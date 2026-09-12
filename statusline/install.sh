@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Install (or update) this Claude Code status line on the current machine:
-#   curl -fsSL https://raw.githubusercontent.com/iamJeb/iamjeb-public_claude/main/statusline/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/iamJeb/claude/main/statusline/install.sh | bash
 # Re-run the same line any time to pull the latest version. Needs only curl + python3.
 set -euo pipefail
 
-RAW="https://raw.githubusercontent.com/iamJeb/iamjeb-public_claude/main/statusline"
+RAW="https://raw.githubusercontent.com/iamJeb/claude/main/statusline"
 DEST="$HOME/.claude/statusline.py"
 
 command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 1; }
@@ -32,13 +32,15 @@ if os.path.exists(p):
 if s.get("statusLine") == want:
     print("settings.json already points at the status line")
 else:
+    note = "created ~/.claude/settings.json"
     if os.path.exists(p):
         shutil.copy(p, p + ".bak-statusline-" + time.strftime("%Y%m%d-%H%M%S"))
+        note = "updated ~/.claude/settings.json (backup saved next to it)"
     s["statusLine"] = want
     with open(p, "w") as f:
         json.dump(s, f, indent=2)
         f.write("\n")
-    print("updated ~/.claude/settings.json (backup saved next to it)")
+    print(note)
 PY
 
 echo "done — restart Claude Code (or start a new session) to see it."

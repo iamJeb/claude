@@ -14,7 +14,7 @@ is when that limit resets; the line refreshes every 30s so countdowns keep movin
 ## Install / update on any machine
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/iamJeb/iamjeb-public_claude/main/statusline/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/iamJeb/claude/main/statusline/install.sh | bash
 ```
 
 Needs only `curl` and `python3` (3.8+). It copies `statusline.py` to `~/.claude/` and sets
