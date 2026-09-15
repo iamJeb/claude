@@ -6,7 +6,7 @@ any machine.
 
 | Tool | What it is | Install |
 |---|---|---|
-| [statusline](statusline/) | Two-row status line: session, model, effort, uptime; color-coded context / 5h / weekly usage bars | `curl -fsSL https://raw.githubusercontent.com/iamJeb/claude/main/statusline/install.sh \| bash` |
+| [statusline](statusline/) | Quota-aware status line: context / 5h / weekly meters with pace ticks, per-window burn history, and a bar attributing what is filling the context | `curl -fsSL https://raw.githubusercontent.com/iamJeb/claude/main/statusline/install.sh \| bash` |
 
 ## Setting up a new machine with Claude Code
 
