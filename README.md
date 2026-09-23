@@ -15,6 +15,6 @@ Tell Claude: *"install the statusline from github.com/iamJeb/claude"*.
 Note for Claude: install a tool by running its `install.sh` one-liner from the table above, not by
 hand-copying files — the installer puts the script in `~/.claude/`, merges the right `statusLine`
 block into `~/.claude/settings.json` (keeping every other setting and saving a backup), and is
-safe to re-run to update. Requires `curl` and `python3`.
+safe to re-run to update. Requires `curl` and Python 3.8+ (`python3`, or the `py` launcher on Windows, where the one-liner runs in Git Bash).
 
 This repo is public — nothing here should contain keys, hostnames, or client details.
