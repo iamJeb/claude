@@ -35,6 +35,7 @@ if it fails the charts dim out and the row still prints.
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -43,9 +44,9 @@ import time
 
 # ---------------------------------------------------------------- config ----
 # Separator for the powerline header.
-#   ""  true powerline wedge  - REQUIRES a Nerd Font on the CLIENT
-#   "◥"  ◥ upper-right triangle - standard Unicode, no install  (default)
-#   "▐"  ▐ right half block     - standard Unicode, no install
+#   ""       true powerline wedge  - REQUIRES a Nerd Font on the CLIENT (default)
+#   "◥"       upper-right triangle  - standard Unicode, no install
+#   "▐"       right half block      - standard Unicode, no install
 #   ""        none, colour change only
 SEP = os.environ.get("CLAUDE_STATUSLINE_SEP", "\ue0b0")
 
@@ -83,7 +84,12 @@ NAME_MAX = 14      # session title is truncated to this
 HEADER_W = 34      # header is padded to this so the gutter under it is stable
 # the burn bar fills whatever the gutter gives it (set at render time)
 CACHE_DIR = os.path.expanduser("~/.claude/statusline-cache")
+CACHE_VER = 2                          # bump to force a re-parse after a format change
+CACHE_KEEP_S = 14 * 86400              # burn caches untouched this long are deleted
 MAX_TRANSCRIPT = 64 * 1024 * 1024      # refuse to parse a pathological transcript
+CHARS_PER_TOKEN = 2.6                  # measured from token growth between calls on real transcripts
+IMAGE_CHARS = 1600 * CHARS_PER_TOKEN   # an image costs ~1.6K tokens, not its base64 length
+SPARK_MIN_RANGE = 10.0                 # ctx points needed to fill the sparkline's height
 BAR_W = 8          # meter width
 SERIES_W = 14      # series column width - shared so columns align
 # Each series cell is 2 chars: a value glyph plus a dim axis label. All three
@@ -196,112 +202,259 @@ CAT_SLOTS = ((57, 135, 229), (217, 89, 38), (25, 158, 112), (201, 133, 0),
 CAT_OTHER = (110, 110, 118)
 
 
-def burn_state(sid, path, now):
-    """What is costing quota, by source, weighted by how long it has persisted.
+def _fresh_state():
+    return {"v": CACHE_VER, "off": 0, "T": 0, "seen": [], "use": 0,
+            "names": {}, "src": {}, "agents": {}}
 
-    Quota burn is context x turns: every turn re-reads the whole context, so a
-    block added at turn 10 of 50 is paid for 40 more times. Per source we keep
-    s  = sum of sizes and si = sum of size*turn_added, which makes the weighted
-    share incrementally computable as  T*s - si  for the current turn count T.
 
-    The transcript is parsed INCREMENTALLY from a byte offset cached per
-    session, so the 10s refresh re-reads only what was appended.
+def _new_lines(path, off):
+    """Complete JSONL records appended after byte `off`, and the offset past them.
+
+    Binary mode, so the offset is a true byte position comparable with getsize().
+    A trailing line with no newline yet is still being written: it is left for
+    the next refresh rather than skipped for good.
     """
-    if not sid or not path or not os.path.exists(path):
+    with open(path, "rb") as fh:
+        fh.seek(off)
+        chunk = fh.read()
+    end = chunk.rfind(b"\n") + 1
+    out = []
+    for raw in chunk[:end].splitlines():
+        try:
+            out.append(json.loads(raw.decode("utf-8", "replace")))
+        except Exception:
+            continue
+    return out, off + end
+
+
+def _input_tokens(usage):
+    """Tokens one API call read: fresh input plus cache writes plus cache reads."""
+    return sum(int(usage.get(k) or 0) for k in
+               ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+
+
+def _size(body):
+    """Chars a block puts in the context. Images count at their token cost."""
+    if body is None:
+        return 0
+    if isinstance(body, str):
+        return len(body)
+    if isinstance(body, list):
+        n = 0
+        for x in body:
+            if isinstance(x, dict) and x.get("type") == "image":
+                n += IMAGE_CHARS
+            elif isinstance(x, dict) and x.get("type") == "text":
+                n += len(x.get("text", ""))
+            else:
+                n += len(json.dumps(x))
+        return n
+    return len(json.dumps(body))
+
+
+def _count_call(rec, d):
+    """Fold one transcript record's API usage into rec. One call is written as
+    several records (thinking, text, each tool_use) carrying the same message id
+    and the same usage, so only the first record of each id counts."""
+    m = d.get("message") or {}
+    if d.get("type") != "assistant" or not m.get("usage") or m.get("model") == "<synthetic>":
+        return False
+    # two streams can interleave (A, B, A), so check the recent ids, not just the last
+    seen = rec.setdefault("seen", [])
+    if m.get("id") in seen:
+        return False
+    seen.append(m.get("id"))
+    del seen[:-32]
+    rec["use"] += _input_tokens(m["usage"])
+    return True
+
+
+def _read_main(st, path):
+    """Parse the main transcript from the cached offset into st["src"].
+
+    st["src"][source] = [s, si, frozen]: s is the chars of that source still in
+    the context, si is sum(size * call it arrived at), so its re-read cost so
+    far is T*s - si for T calls. A /compact drops everything before it from the
+    context, so at the boundary each source's cost is moved into `frozen` and
+    s/si restart from zero.
+    """
+    lines, st["off"] = _new_lines(path, st["off"])
+
+    def add(src, n):
+        acc = st["src"].setdefault(src, [0, 0, 0])
+        acc[0] += n
+        acc[1] += n * st["T"]
+
+    for d in lines:
+        if d.get("subtype") == "compact_boundary":
+            for acc in st["src"].values():
+                acc[2] += st["T"] * acc[0] - acc[1]
+                acc[0] = acc[1] = 0
+            continue
+        if _count_call(st, d):
+            st["T"] += 1
+        m = d.get("message") or {}
+        who = "mine" if d.get("type") == "assistant" else "you"
+        c = m.get("content")
+        if isinstance(c, str):
+            # typed prompts and the /compact summary arrive as plain strings
+            add("summary" if d.get("isCompactSummary") else who, len(c))
+            continue
+        if not isinstance(c, list):
+            continue
+        for blk in c:
+            if not isinstance(blk, dict):
+                continue
+            bt = blk.get("type")
+            if bt == "tool_use":
+                # the COMMAND counts too - a heredoc script is often
+                # larger than the output it produces
+                src = blk.get("name", "tool")
+                st["names"][blk.get("id")] = src
+                add(src, len(json.dumps(blk.get("input", {}))))
+            elif bt == "tool_result":
+                add(st["names"].get(blk.get("tool_use_id"), "tool"), _size(blk.get("content")))
+            elif bt == "text":
+                add(who, len(blk.get("text", "")))
+            elif bt == "image":
+                add(who, IMAGE_CHARS)
+            elif bt == "thinking":
+                add("think", len(blk.get("thinking", "")))
+    if len(st["names"]) > 400:        # only recent ids are ever resolved
+        st["names"] = dict(list(st["names"].items())[-200:])
+
+
+def _read_agents(st, path):
+    """Subagents run in their own context and bill their own calls, and none of
+    it is in the main transcript: Claude Code writes each one to
+    <session>/subagents/agent-*.jsonl with its type in a .meta.json beside it.
+    Their API usage is summed per file, so it already includes each agent's own
+    system prompt and tool definitions. Returns True if anything was read."""
+    d = os.path.join(os.path.splitext(path)[0], "subagents")
+    try:
+        names = [e.name for e in os.scandir(d) if e.name.endswith(".jsonl")]
+    except OSError:
+        return False
+    grew = False
+    for name in names:
+        f = os.path.join(d, name)
+        rec = st["agents"].setdefault(name, {"off": 0, "seen": [], "use": 0, "type": None})
+        if not rec["type"]:
+            try:
+                with open(f[:-len(".jsonl")] + ".meta.json", encoding="utf-8") as fh:
+                    t = json.load(fh).get("agentType")
+                    rec["type"] = str(t) if t else None
+            except Exception:
+                pass                      # meta may land after the transcript; retry next time
+        try:
+            size = os.path.getsize(f)
+            if size < rec["off"]:
+                rec.update(off=0, seen=[], use=0)
+            if size > rec["off"]:
+                lines, rec["off"] = _new_lines(f, rec["off"])
+                for x in lines:
+                    _count_call(rec, x)
+                grew = True
+        except OSError:
+            continue
+    return grew
+
+
+def _prune_caches(keep):
+    """Drop burn caches for sessions nobody has touched in CACHE_KEEP_S."""
+    cutoff = time.time() - CACHE_KEEP_S
+    try:
+        entries = list(os.scandir(CACHE_DIR))
+    except OSError:
+        return
+    for e in entries:
+        try:
+            ours = e.name.endswith(".json") or e.name.startswith(".c")
+            if ours and e.name != keep and e.is_file() and e.stat().st_mtime < cutoff:
+                os.unlink(e.path)
+        except OSError:
+            continue
+
+
+def burn_state(sid, path, now):
+    """What is costing quota in this session, by source, as [(name, weight)].
+
+    Quota burn is context x calls: every API call re-reads the whole context, so
+    a block added at call 10 of 50 is paid for 40 more times. Weights are in
+    chars (tokens x CHARS_PER_TOKEN) so the three kinds of source share a unit:
+
+      transcript sources  Bash, Read, you, mine ...   size x calls since it arrived
+      base                what the transcript cannot show (system prompt, tool
+                          definitions, skills, CLAUDE.md, memory, reminders, and
+                          thinking, which transcripts store empty): the
+                          session's real input tokens minus everything above
+      @<agent type>       subagents: their real input tokens, summed
+
+    Transcripts are parsed INCREMENTALLY from byte offsets cached per session,
+    so a refresh re-reads only what was appended.
+    """
+    if not sid or not path or not isinstance(path, str) or not os.path.isfile(path):
+        return None
+    if not re.fullmatch(r"[\w-]+", str(sid)):     # it becomes a file name
         return None
     cache = os.path.join(CACHE_DIR, f"{sid}.json")
-    st = {"off": 0, "T": 0, "names": {}, "src": {}}
+    st, fresh = _fresh_state(), True
     try:
-        with open(cache) as fh:
+        with open(cache, encoding="utf-8") as fh:
             got = json.load(fh)
-        if isinstance(got, dict) and "src" in got:
-            st = got
+        if isinstance(got, dict) and got.get("v") == CACHE_VER and set(_fresh_state()) <= set(got):
+            st, fresh = got, False
     except Exception:
         pass
 
-    size = os.path.getsize(path)
-    if size > MAX_TRANSCRIPT:
-        return None
-    if size < st["off"]:                      # transcript replaced - start over
-        st = {"off": 0, "T": 0, "names": {}, "src": {}}
-    if size > st["off"]:
+    changed = False
+    try:
+        size = os.path.getsize(path)
+        if size > MAX_TRANSCRIPT:
+            return None
+        if size < st["off"]:                  # transcript replaced - start over
+            st = _fresh_state()
+        if size > st["off"]:
+            _read_main(st, path)
+            changed = True
+        changed = _read_agents(st, path) or changed
+    except Exception:
         try:
-            with open(path, "r", errors="replace") as fh:
-                fh.seek(st["off"])
-                for line in fh:
-                    try:
-                        d = json.loads(line)
-                    except Exception:
-                        continue
-                    m = d.get("message") or {}
-                    if d.get("type") == "assistant" and (m.get("usage") or {}):
-                        st["T"] += 1
-                    c = m.get("content")
-                    if not isinstance(c, list):
-                        continue
-                    for blk in c:
-                        if not isinstance(blk, dict):
-                            continue
-                        bt = blk.get("type")
-                        if bt == "tool_use":
-                            # the COMMAND counts too - a heredoc script is often
-                            # larger than the output it produces
-                            src = blk.get("name", "tool")
-                            st["names"][blk.get("id")] = src
-                            n = len(json.dumps(blk.get("input", {})))
-                        elif bt == "tool_result":
-                            src = st["names"].get(blk.get("tool_use_id"), "tool")
-                            body = blk.get("content")
-                            n = len(body) if isinstance(body, str) else len(json.dumps(body))
-                        elif bt == "text":
-                            src = "mine" if d.get("type") == "assistant" else "you"
-                            n = len(blk.get("text", ""))
-                        elif bt == "thinking":
-                            src, n = "think", len(blk.get("thinking", ""))
-                        else:
-                            continue
-                        acc = st["src"].setdefault(src, [0, 0])
-                        acc[0] += n
-                        acc[1] += n * st["T"]
-                st["off"] = fh.tell()
-            if len(st["names"]) > 400:        # only recent ids are ever resolved
-                st["names"] = dict(list(st["names"].items())[-200:])
+            os.unlink(cache)                  # a damaged cache must not stick; re-parse next time
+        except Exception:
+            pass
+        return None
+    if changed:
+        tmp = None
+        try:
             os.makedirs(CACHE_DIR, exist_ok=True)
             fd, tmp = tempfile.mkstemp(dir=CACHE_DIR, prefix=".c")
-            with os.fdopen(fd, "w") as fh:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(st, fh, separators=(",", ":"))
             os.replace(tmp, cache)
+            tmp = None
+            if fresh:
+                _prune_caches(f"{sid}.json")
         except Exception:
-            return None
+            pass
+        finally:
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
 
-    T = max(1, st["T"])
-    w = {k: max(0, T * v[0] - v[1]) for k, v in st["src"].items()}
-    chars = sum(v[0] for v in st["src"].values())
-    w = {k: v for k, v in w.items() if v > 0}
-    return (sorted(w.items(), key=lambda kv: -kv[1]), chars, T) if w else None
-
-
-def with_overhead(burn, data):
-    """Fold in the fixed context nobody can see in the transcript.
-
-    System prompt + tool definitions + loaded skills + CLAUDE.md + MEMORY.md are
-    resident from turn one and re-read every turn, so they are usually the single
-    largest cost - and they never appear in the transcript. Infer them as
-    (resident context) - (message content) and weight them across ALL turns.
-    """
-    if not burn:
-        return None
-    sources, chars, T = burn
-    ctx = data.get("context_window") or {}
-    resident = ctx.get("total_input_tokens")
-    if not resident:
-        size, pct = ctx.get("context_window_size"), ctx.get("used_percentage")
-        resident = (size * pct / 100.0) if size and pct is not None else None
-    if resident and BURN_SCOPE != "convo":
-        base = max(0.0, resident * 4 - chars)     # tokens -> chars, same units
+    T = st["T"]
+    w = {k: max(0, v[2] + T * v[0] - v[1]) for k, v in st["src"].items()}
+    if BURN_SCOPE != "convo":
+        base = st["use"] * CHARS_PER_TOKEN - sum(w.values())
         if base > 0:
-            sources = sorted(sources + [("base", base * T)], key=lambda kv: -kv[1])
-    return sources
+            w["base"] = base
+    for rec in st["agents"].values():
+        k = "@" + str(rec.get("type") or "agent")
+        w[k] = w.get(k, 0) + rec["use"] * CHARS_PER_TOKEN
+    w = {k: v for k, v in w.items() if v > 0}
+    return sorted(w.items(), key=lambda kv: -kv[1]) or None
 
 
 def gutter(burn, w):
@@ -406,14 +559,17 @@ def spark_cells(vals):
     known = [v for v in vals if v is not None]
     if not known:
         return [f"{FAINT}{HEAT_OFF}" for _ in vals]
+    # Scaled to the window's own range, but never less than SPARK_MIN_RANGE
+    # points, so a 0.5-point wobble stays flat instead of drawing full height.
     lo, hi = min(known), max(known)
-    rng = (hi - lo) or 1.0
+    rng = max(hi - lo, SPARK_MIN_RANGE)
+    top = len(SPARK) - 1                      # SAFE mode has one glyph fewer
     ink = (lambda v: col(v)) if PALETTE == "legacy" else (lambda v: SPARK_INK)
     return [f"{FAINT}{HEAT_OFF}" if v is None
-            else ink(v) + SPARK[min(7, int((v - lo) / rng * 8))] for v in vals]
+            else ink(v) + SPARK[min(top, int((v - lo) / rng * len(SPARK)))] for v in vals]
 
 
-def heat_cells(buckets, cur):
+def heat_cells(buckets, cur, firsts=None):
     """Burn per bucket, as HEIGHT first and colour second.
 
     A 1-char tile can't carry magnitude in colour alone - at that size a dark
@@ -424,23 +580,45 @@ def heat_cells(buckets, cur):
     Scale is ABSOLUTE, not normalised to the window's own max: full height = 2x
     an even-pace cell, so half height IS even pace. A quiet window therefore
     shows short bars instead of rescaling a trivial cell up to look alarming.
-    """
-    deltas, prev = [], 0.0
-    for b in buckets:
-        if b is None:
-            deltas.append(None)
-        else:
-            deltas.append(max(0.0, b - prev))
-            prev = b
 
-    full = 200.0 / max(1, len(buckets))      # 2x the even-pace share of one cell
+    Burn nobody watched (before the first sample in a window, while no session
+    was open, or on another device) only shows up at the next sample. Rather
+    than stack it all on that one cell as a false spike, it is spread evenly
+    back across the unobserved cells and drawn in grey: it happened somewhere
+    in that stretch, and the strip does not know where. Only the part below the
+    cell's FIRST sample is unobserved; what burned after it was watched live
+    and keeps its colour.
+    """
+    n = len(buckets)
+    firsts = firsts or [None] * n
+    deltas, guessed = [None] * n, [False] * n
+    prev, prev_i = 0.0, -1                    # every window starts at 0%
+    for i, b in enumerate(buckets):
+        if b is None:
+            continue
+        span = i - prev_i
+        if span == 1:
+            deltas[i] = max(0.0, b - prev)
+        else:
+            # the part below cell i's first sample goes grey over the gap cells;
+            # cell i keeps only what burned after its first sample
+            first = firsts[i] if firsts[i] is not None else b   # older records: all unseen
+            first = min(max(first, prev), b)
+            unseen = (first - prev) / (span - 1)
+            for j in range(prev_i + 1, i):
+                deltas[j], guessed[j] = unseen, True
+            deltas[i] = b - first
+        prev, prev_i = b, i
+
+    full = 200.0 / max(1, n)                  # 2x the even-pace share of one cell
     cells = []
     for i, d in enumerate(deltas):
         if d is None:
             cells.append((FAINT if i > cur else DIM) + HEAT_OFF)
         else:
             t = max(0.0, min(1.0, d / full))
-            cells.append(tile(t) + SPARK[min(len(SPARK) - 1, int(t * len(SPARK)))])
+            ink = DIM if guessed[i] else tile(t)
+            cells.append(ink + SPARK[min(len(SPARK) - 1, int(t * len(SPARK)))])
     return cells
 
 
@@ -505,7 +683,7 @@ def until(epoch, now):
 # --------------------------------------------------------------- history ----
 def load_history(path=HISTORY):
     try:
-        with open(path) as fh:
+        with open(path, encoding="utf-8") as fh:
             h = json.load(fh)
         return h if isinstance(h, dict) else {}
     except Exception:
@@ -517,7 +695,7 @@ def save_history(hist, path=HISTORY):
     try:
         d = os.path.dirname(path) or "."
         fd, tmp = tempfile.mkstemp(dir=d, prefix=".statusline-hist.")
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(hist, fh, separators=(",", ":"))
         os.replace(tmp, path)          # atomic; concurrent sessions can't tear it
     except Exception:
@@ -526,6 +704,15 @@ def save_history(hist, path=HISTORY):
                 os.unlink(tmp)
             except Exception:
                 pass
+
+
+def _finite(v):
+    """v as a float, or None if it is missing, not a number, NaN or infinite."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
 
 
 def update_history(hist, data, now):
@@ -538,24 +725,31 @@ def update_history(hist, data, now):
         win = limits.get(key)
         if not isinstance(win, dict):
             continue
-        pct, resets = win.get("used_percentage"), win.get("resets_at")
+        pct, resets = _finite(win.get("used_percentage")), win.get("resets_at")
         if pct is None or not resets:
             continue
-        rec = hist["w"].setdefault(find_window_key(hist, key, resets), {"b": [None] * n})
-        buckets = rec["b"]
-        if len(buckets) != n:                 # bucket count changed -> restart clean
-            buckets = rec["b"] = [None] * n
-        idx = int(max(0, min(n - 1, (now - (resets - span)) / span * n)))
+        wkey = find_window_key(hist, key, resets)
+        rec = hist["w"].setdefault(wkey, {"b": [None] * n, "f": [None] * n})
+        buckets, firsts = rec["b"], rec.setdefault("f", [None] * n)
+        if len(buckets) != n or len(firsts) != n:   # bucket count changed -> restart clean
+            buckets, firsts = rec["b"], rec["f"] = [None] * n, [None] * n
+        # index from the matched record's own reset, not this payload's: sessions
+        # disagree by minutes, and the record's cells must mean one thing
+        kr = int(wkey.rsplit(":", 1)[-1])
+        idx = int(max(0, min(n - 1, (now - (kr - span)) / span * n)))
         prev = buckets[idx]
+        if prev is None:
+            firsts[idx] = float(pct)          # first sample: anything below it was unobserved
         buckets[idx] = float(pct) if prev is None else max(prev, float(pct))
 
     # context: TIME-indexed (t, pct) pairs so the sparkline has a real x-axis.
     # Sampled on change or at least every 30s, so an idle stretch reads as flat.
     sid = data.get("session_id")
-    ctx = (data.get("context_window") or {}).get("used_percentage")
+    ctx = _finite((data.get("context_window") or {}).get("used_percentage"))
     if sid and ctx is not None:
         rec = hist["s"].setdefault(sid, {"u": now, "t": [], "p": []})
-        rec["u"] = now
+        if now - rec.get("u", 0) >= 600:   # coarse, so an idle refresh leaves the file alone
+            rec["u"] = now
         if not isinstance(rec.get("t"), list) or len(rec.get("t", [])) != len(rec.get("p", [])):
             rec["t"], rec["p"] = [], []       # migrate old turn-indexed records
         ts, ps = rec["t"], rec["p"]
@@ -611,9 +805,13 @@ def find_window_key(hist, kind, resets):
 
 
 def window_buckets(hist, kind, resets, n):
-    rec = (hist.get("w") or {}).get(find_window_key(hist, kind, resets)) if resets else None
+    """(max per cell, first sample per cell, the record's own resets_at)."""
+    wkey = find_window_key(hist, kind, resets) if resets else None
+    rec = (hist.get("w") or {}).get(wkey) if wkey else None
     b = (rec or {}).get("b") or []
-    return (list(b) + [None] * n)[:n]
+    f = (rec or {}).get("f") or []
+    kr = int(wkey.rsplit(":", 1)[-1]) if rec else resets
+    return (list(b) + [None] * n)[:n], (list(f) + [None] * n)[:n], kr
 
 
 def ctx_series(rec, now):
@@ -703,8 +901,10 @@ def quota_row(rail, label, win, hist, key, span, n, now):
     pace, cur = None, n - 1
     if resets:
         pace = max(0.0, min(1.0, 1.0 - (resets - now) / span))
-        cur = int(max(0, min(n - 1, pace * n)))
-    cells = heat_cells(window_buckets(hist, key, resets, n), cur)
+    b, f, kr = window_buckets(hist, key, resets, n)
+    if kr:
+        cur = int(max(0, min(n - 1, (now - (kr - span)) / span * n)))
+    cells = heat_cells(b, cur, f)
     return row(rail, label, bar(pct, pace=pace), f"{col(pct)}{pct:4.0f}%{R}",
                woven(cells, labels, cur), " " * len(TREND[0]),
                until(resets, now) if resets else "")
@@ -732,8 +932,7 @@ def build_lines(data, now, hist, layout=LAYOUT):
     # burning quota. Every line below row 0 starts with a colour escape, not a
     # literal space - Claude Code's renderer strips leading whitespace, which
     # would silently un-indent these rows and shear the table.
-    burn = with_overhead(
-        burn_state(data.get("session_id"), data.get("transcript_path"), now), data)
+    burn = burn_state(data.get("session_id"), data.get("transcript_path"), now)
     lines = [head + gap + rows[0]]
     # Each gutter row starts at column 0, flush with the header above it, and
     # begins with a colour escape rather than a space so the renderer's
@@ -744,22 +943,35 @@ def build_lines(data, now, hist, layout=LAYOUT):
 
 
 def main():
+    # Windows pipes default to cp1252, which cannot encode the glyphs (and would
+    # misread a non-ASCII session name), so pin both ends to UTF-8.
     try:
-        data = json.load(sys.stdin)
+        sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
-        return 0
+        pass
+    try:
+        data = json.loads(sys.stdin.buffer.read())
+    except Exception:
+        data = None
     if not isinstance(data, dict):
+        print(f"{DIM}statusline: unreadable payload{R}")
         return 0
 
     now = int(time.time())
     hist = load_history()
     try:
+        before = json.dumps(hist, sort_keys=True)
         update_history(hist, data, now)
-        save_history(hist)
+        if json.dumps(hist, sort_keys=True) != before:
+            save_history(hist)
     except Exception:
         pass
 
-    for line in build_lines(data, now, hist):
+    try:
+        lines = build_lines(data, now, hist)
+    except Exception:                         # a malformed payload must not blank the line
+        lines = [f"{DIM}statusline: render failed{R}"]
+    for line in lines:
         print(line)
     return 0
 

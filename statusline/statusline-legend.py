@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
 """How to read the status line - and what's worth reading."""
+import importlib.util
+import pathlib, sys
+
+# a Windows console or pipe may default to cp1252, which cannot encode these glyphs
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+# The meters, strips and gutter come from the real script, so the legend wears
+# the same palette the status line does.
+spec = importlib.util.spec_from_file_location("sl", str(pathlib.Path(__file__).with_name("statusline.py")))
+sl = importlib.util.module_from_spec(spec); spec.loader.exec_module(sl)
+
 R="\033[0m";D="\033[38;5;243m";F="\033[38;5;238m";L="\033[38;5;245m";T="\033[1;38;5;252m"
 G="\033[38;5;71m";Y="\033[38;5;179m";RD="\033[38;5;167m";W="\033[1;38;5;255m"
-def fg(c):return f"\033[38;2;{c[0]};{c[1]};{c[2]}m"
-def bg(c):return f"\033[48;2;{c[0]};{c[1]};{c[2]}m"
-def ramp(p):
-    p=max(0,min(1,p/100))
-    if p<.5:t=p/.5;return(int(90+155*t),int(190-20*t),90)
-    t=(p-.5)/.5;return(245,int(170-110*t),int(90-10*t))
-def c(p):return fg(ramp(p))
-def meter(p,w=8,pace=None):
-    u=p/100*w;full=int(u);fr=" ▏▎▍▌▋▊▉"[int((u-full)*8)]
-    cells=(["█"]*full+([fr] if fr!=" " else [])+["░"]*w)[:w]
-    tk=int(min(w-1,(pace or 0)*w)) if pace is not None else -1
-    return "".join(("\033[38;5;255m┃" if ch!="░" else "\033[38;5;252m│") if i==tk
-                   else(D+"░" if ch=="░" else c(p)+ch) for i,ch in enumerate(cells))+R
+fg, bg = sl.fg, sl.bg
+c = sl.col          # meter / percentage colour
+meter = sl.bar      # meter(pct, w=8, pace=None)
+
+# A week whose first sample landed on day 3: days 1-3 share that burn, in grey.
+WK = ["t", "w", "t", "f", "s", "s", "m"]
+strip = sl.woven(sl.heat_cells([None, None, 21.0, 33.0, 63.0, None, None], 4), WK, 4)
+
+# The bar at its real gutter width; the key a little wider so all four labels fit.
+BURN = [("base", 550), ("@general-purpose", 220), ("Bash", 150), ("summary", 80)]
+gut_bar = sl.gutter(BURN, 33)[0]
+gut_key = sl.gutter(BURN, 40)[1]
 
 print(f"""
 {T}THE ONLY THREE THINGS THAT SHOULD CHANGE WHAT YOU DO{R}
@@ -44,23 +57,27 @@ print(f"""
 
 {T}WORTH A GLANCE, NOT A DECISION{R}
 
-  {D}▂s█s▂m▂t█w▂t·f{R}   the heat strips. One cell per hour (5h) or day (wk).
+  {strip}   the heat strips. One cell per hour (5h) or day (wk).
 
    {W}Read the HEIGHT, not the colour.{R}  {D}Colour only reinforces it - at one
    character wide, two steps of one hue are indistinguishable, so height
    carries the value and the strip stays readable in monochrome.{R}
 
-     {D}█{R}{D}  a cell at 2x even pace or more - this is where your quota went{R}
-     {D}▄{R}{D}  exactly even pace (half height IS the break-even mark){R}
-     {D}▁{R}{D}  observed, but you burned almost nothing that hour/day{R}
-     {D}·{R}{D}  never sampled - rate_limits hadn't refreshed yet, so we were
-        still being told about the PREVIOUS window{R}
+     {sl.tile(1.0)}█{R}{D}  a cell at 2x even pace or more - this is where your quota went{R}
+     {sl.tile(0.5)}▅{R}{D}  even pace (about half height; anything shorter is under it){R}
+     {sl.tile(0.05)}▁{R}{D}  observed, but you burned almost nothing that hour/day{R}
+     {D}▂  grey: burn nobody saw happen - before the first sample in a window,
+        while no session was open, or on another device. It only shows up at
+        the next sample, so it is spread evenly back across the cells it could
+        have fallen in, instead of piling onto one cell as a false spike. The
+        height is that average; the strip cannot know which cell it was.{R}
+     {D}·  no sample yet{R}
 
    {D}The scale is absolute, not relative to the window's own peak: a quiet
    week shows short bars rather than rescaling its biggest trivial day up to
    look alarming. Tall bars genuinely mean heavy.{R}
-   {D}Leading dots after a window rolls over are normal: the payload only
-   updates on an API response, so the first stretch is always unobserved.{R}
+   {D}Grey bars at the start of a window are normal: rate_limits only update
+   on an API response, so the stretch before the first one is never watched.{R}
 
   {bg((110,160,220))}\033[38;2;18;18;22m my-project {R}     the header: which session, model and effort
                    {D}level this window is on. Earns its space when several
@@ -78,18 +95,34 @@ print(f"""
 
 {T}THE GUTTER - what is actually burning your weekly quota{R}
 
-  {fg((57,135,229))}▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄{fg((217,89,38))}▄▄▄▄▄{fg((25,158,112))}▄{R}   {D}one stacked bar, full gutter width{R}
-  {fg((57,135,229))}▄{R}{L}base{R} {D}78{R}  {fg((217,89,38))}▄{R}{L}Bash{R} {D}17{R}  {fg((25,158,112))}▄{R}{L}mine{R} {D}2{R}    {D}share of context RE-READ burden{R}
+  {gut_bar}   {D}one stacked bar, full gutter width{R}
+  {gut_key}  {D}share of context RE-READ burden{R}
 
-  {W}Weighted by persistence, not size.{R} {D}Every turn re-reads your whole context,
-  so a block added 40 turns ago has been paid for 40 times. Each source is
-  scored size x turns-it-has-persisted.{R}
+  {W}Weighted by persistence, not size.{R} {D}Every API call re-reads your whole
+  context, so a block added 40 calls ago has been paid for 40 times. Each
+  source is scored size x calls-since-it-arrived. Images count at about 1.6K
+  tokens each, not their base64 length.{R}
 
-  {W}base{R} {D}is the big one and the least obvious: system prompt + tool
-  definitions + any skill loaded this session + CLAUDE.md + MEMORY.md. It is
-  resident from turn one, so it carries maximum weight.{R}
+  {W}base{R} {D}is the big one and the least obvious: everything the transcript
+  cannot show - system prompt, tool definitions, skills loaded this session,
+  CLAUDE.md, memory files, reminders. It is measured, not guessed: the
+  session's real input tokens (each API call's usage, counted once per
+  message id) minus everything the transcript does show. It is resident from
+  turn one, so it carries maximum weight.{R}
   {W}/clear does NOT reduce base.{R} {D}A fresh session pays it again. What reduces
   it is loading fewer/smaller skills and keeping CLAUDE.md + MEMORY.md tight.{R}
+
+  {W}@gen @Exp{R} {D}subagents, by type, cut to 4 characters (@gen = general-purpose,
+  @Exp = Explore; your own agent types show the same way). Each runs in its
+  own context and bills its own calls, so its real input tokens are summed
+  from its own transcript under <session>/subagents/, its own system prompt
+  and tools included.{R}
+  {W}Agen{R} {D}the Agent tool as seen from THIS context: the prompt sent to a
+  subagent and the report it sent back. Both stay resident here and are
+  re-read on every later call.{R}
+  {W}summ{R} {D}the summary a /compact leaves behind. A /compact freezes the cost of
+  everything before it: those sources stop growing, and only the summary and
+  what comes after it accrue from there.{R}
 
   {W}What to do:{R}
     {D}base high{R}   {D}-> a big skill is loaded. Nothing to do mid-session; avoid
@@ -97,6 +130,8 @@ print(f"""
     {D}Bash high{R}   {D}-> BOTH the commands I write and their output count.
                  Ask for narrower commands and less verbose output.{R}
     {D}mine/you{R}    {D}-> long replies / large pastes. Reference files by path.{R}
+    {D}@agent high{R} {D}-> subagents did the heavy reading, which keeps it out of
+                 this context. Worth it while their reports (Agen) stay short.{R}
     {W}/clear{R}      {D}-> resets everything EXCEPT base.{R}
 
   {D}Categories are per-session: a session that edits files shows Read/Edit/Write
