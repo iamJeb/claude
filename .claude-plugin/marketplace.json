@@ -1,0 +1,13 @@
+{
+  "name": "iamjeb-claude",
+  "owner": {
+    "name": "iamJeb"
+  },
+  "description": "Claude Code plugins from iamJeb/claude",
+  "plugins": [
+    {
+      "name": "stretch",
+      "source": "./plugins/stretch"
+    }
+  ]
+}
