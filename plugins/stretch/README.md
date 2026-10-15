@@ -64,7 +64,3 @@ To remove it:
 ```
 /plugin uninstall stretch
 ```
-
-## Credit
-
-The idea and parts of the parser and terminal layout come from [cc-stretch](https://github.com/pro-vi/cc-stretch) by pro-vi, under the MIT License. Its notice is in `LICENSE-cc-stretch`. I rebuilt it to fix the cases that broke for me on Windows and Claude Code 2.1.300, including replies that never became clickable, stray braces that swallowed text, and wide characters that put clicks on the wrong phrase.

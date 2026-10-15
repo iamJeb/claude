@@ -29,6 +29,4 @@ Keeps Claude Code replies short and puts the detail one click away. Replies land
 /tui fullscreen
 ```
 
-Adapted in part from [cc-stretch](https://github.com/pro-vi/cc-stretch) by pro-vi, under the MIT License.
-
 This repo is public — nothing here should contain keys, hostnames, or client details.
