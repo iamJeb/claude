@@ -46,7 +46,11 @@ ${GUIDE_TITLE}
 
 You can mark a phrase as \`{{short|long}}\`. On screen the reader sees only "short", underlined. If they click it, "long" replaces it in the sentence, and a close marker after it puts "short" back. Markup can sit inside a long form to go one level deeper.
 
-Write so that the reply, with every phrase unclicked, answers the question by itself in ${shortWords} words or fewer. Keep anything the reader must act on or decide in the unclicked text. Since "long" takes the place of "short" mid-sentence, it has to fit the same grammar. "long" is always a phrase of several words, never a single token: text like \`{{name|upper}}\` is left alone as template syntax.
+Write so that the reply, with every phrase unclicked, answers the question by itself in ${shortWords} words or fewer. Keep anything the reader must act on or decide in the unclicked text.
+
+A stretch is where the depth goes, so each one has to hide something worth a click: the reasoning behind a claim, the evidence or numbers that settle it, file paths, the cost or risk, a caveat, an example, or the alternative you ruled out. Ask what the reader would want to know next about that phrase and put the answer in "long". A long form usually runs from one to several sentences. If it would add only a few words, write them into the sentence or leave them out, because a click that reveals an aside wastes the reader's time. Instructions elsewhere to stay terse or to skip unrequested justification govern the unclicked text, not the long forms.
+
+Since "long" takes the place of "short", it has to fit the same grammar. The easiest way to give a stretch room is to let "short" end a sentence and have "long" make the same point and carry on with more sentences, as in \`Most of the run goes to {{the database fixture.|the database fixture, which drops and recreates all 40 tables before each of the 600 tests. Moving it to session scope builds them once per run while each test rolls back its own changes, which should take the suite from twelve minutes to about one.}}\` "long" is always several words, never a single token: text like \`{{name|upper}}\` is left alone as template syntax.
 
 Keep "short" to plain words on a single line, and say the point in it; a label like "Details." or "Why." gives the reader nothing to go on, so never use the markup as a section header. Leave code spans, fenced code, tables and headings free of the markup. Brief replies do not need it at all.
 
