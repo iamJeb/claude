@@ -20,18 +20,26 @@ import type { Segment, Stretch } from './parse'
  */
 export type Tint = { words: string; closer: string }
 
-/** The paragraph, the stretches the reader already has open in it, and the tint of each. */
-export type ReplyProps = { text: string; open: string[]; tints: Record<string, Tint> }
+/** An open-all or close-all from the /stretch command, numbered so the instance applies each once. */
+export type Bulk = { id: number; action: 'open' | 'close' }
+
+/**
+ * The paragraph, the stretches the reader already has open in it, the tint of each, and the latest
+ * open-all or close-all aimed at its reply.
+ */
+export type ReplyProps = { text: string; open: string[]; tints: Record<string, Tint>; bulk?: Bulk }
 
 /**
  * What the instance posts to the hooks module: the open stretches whenever they change, with the
  * stretch the reader just opened (its short form for the note to Claude, its key for its colour),
- * and once on its first draw, `mounted`, so the hooks module knows the reply was drawn.
+ * the short forms an open-all opened, and once on its first draw, `mounted`, so the hooks module
+ * knows the reply was drawn.
  */
-export type ReplyPost = { open: string[]; opened?: { short: string; key: string }; mounted?: true }
+export type ReplyPost = { open: string[]; opened?: { short: string; key: string }; openedAll?: string[]; mounted?: true }
 
 type Growth = { key: string; isOpening: boolean; progress: number; duration: number }
-type State = { open: string[]; growth: Growth | null }
+// `bulk`: the id of the last open-all or close-all applied, or of the one standing at the first draw.
+type State = { open: string[]; growth: Growth | null; bulk: number }
 
 const FRAME_MS = 16
 
@@ -55,20 +63,30 @@ const caches = new WeakMap<object, Cache>()
 const Reply: ClientModule<ReplyProps, State> = (props, surface) => {
   const { Box, Text, Markdown } = surface.elements
   if (surface.state === undefined) {
-    surface.setState({ open: props.open, growth: null })
+    surface.setState({ open: props.open, growth: null, bulk: props.bulk?.id ?? 0 })
     surface.onPointer(event => {
       if (event.type === 'down' && event.button === 'left') press(surface, event.x, event.y)
     })
     surface.every(FRAME_MS, () => tick(surface))
     surface.post({ open: props.open, mounted: true } satisfies ReplyPost)
   }
-  const state = surface.state ?? { open: props.open, growth: null }
+  let state = surface.state ?? { open: props.open, growth: null, bulk: props.bulk?.id ?? 0 }
   const columns = surface.columns > 0 ? surface.columns : 80
   let cache = caches.get(surface)
   if (cache === undefined || cache.text !== props.text) {
     const segments = parse(stripMarkers(props.text))
     cache = { text: props.text, segments, composed: '', columns: -1, rows: [] }
     caches.set(surface, cache)
+  }
+  // An open-all opens every stretch of the paragraph at once, nested ones too; a close-all closes them.
+  const { bulk } = props
+  if (bulk !== undefined && bulk.id !== state.bulk) {
+    const all = stretches(cache.segments).filter(isLinkable)
+    const open = bulk.action === 'open' ? all.map(stretch => stretch.key) : []
+    const opened = all.filter(stretch => !state.open.includes(stretch.key)).map(stretch => stretch.short.trim())
+    state = { open, growth: null, bulk: bulk.id }
+    surface.setState(state)
+    surface.post(bulk.action === 'open' && opened.length > 0 ? ({ open, openedAll: opened } satisfies ReplyPost) : ({ open } satisfies ReplyPost))
   }
   const composed = compose(cache.segments, state, props.tints)
   if (composed !== cache.composed || columns !== cache.columns) {
@@ -151,7 +169,7 @@ function press(surface: ClientSurface<State>, x: number, y: number) {
   // A long paragraph opens and closes at once: laying it out every frame would cost more than a frame.
   if (shown.text.length > ANIMATE_MAX_CHARS) {
     const next = target.action === 'open' ? [...open.filter(key => key !== stretch.key), stretch.key] : closed(open, stretch.key)
-    surface.setState({ open: next, growth: null })
+    surface.setState({ ...state, open: next, growth: null })
     surface.post(
       target.action === 'open' ? ({ open: next, opened: { short: stretch.short.trim(), key: stretch.key } } satisfies ReplyPost) : ({ open: next } satisfies ReplyPost),
     )
@@ -160,10 +178,10 @@ function press(surface: ClientSurface<State>, x: number, y: number) {
   const duration = 1000 * Math.min(1.4, 0.45 + lengthOf(stretch.long) / 70)
   if (target.action === 'open') {
     const next = [...open.filter(key => key !== stretch.key), stretch.key]
-    surface.setState({ open: next, growth: { key: stretch.key, isOpening: true, progress: 0, duration } })
+    surface.setState({ ...state, open: next, growth: { key: stretch.key, isOpening: true, progress: 0, duration } })
     surface.post({ open: next, opened: { short: stretch.short.trim(), key: stretch.key } } satisfies ReplyPost)
   } else {
-    surface.setState({ open, growth: { key: stretch.key, isOpening: false, progress: 1, duration } })
+    surface.setState({ ...state, open, growth: { key: stretch.key, isOpening: false, progress: 1, duration } })
   }
 }
 
@@ -178,7 +196,7 @@ function tick(surface: ClientSurface<State>) {
   }
   // A shrunk stretch, and every stretch inside it, leaves the open list as its growth ends.
   const open = growth.isOpening ? state.open : closed(state.open, growth.key)
-  surface.setState({ open, growth: null })
+  surface.setState({ ...state, open, growth: null })
   if (!growth.isOpening) surface.post({ open } satisfies ReplyPost)
 }
 

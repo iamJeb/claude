@@ -6,7 +6,6 @@ import { widthOf } from '../hooks/layout'
 
 const FULLSCREEN = { columns: 100, rows: 40, isFullscreen: true }
 const MAIN_SCREEN = { columns: 100, rows: 40, isFullscreen: false }
-const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', tools: [], outputStyle: null } as const
 
 const mount = ($: Engine, viewport: typeof FULLSCREEN | undefined, text: string, requestId = 'reply-1', surface: 'terminal' | 'desktop' = 'terminal') =>
   $.ui.mount({
@@ -278,17 +277,5 @@ describe('fullscreen note', () => {
     })
     expect(await has(two as unknown as Mounted)).toBe(false)
     await two.unmount()
-  })
-})
-
-describe('guide', () => {
-  test('the guide is left out of analysis and teammate prompts', async ($, on) => {
-    on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' }] }))
-    for (const traits of [['analysis'], ['teammate']] as const) {
-      const drawn = await $.prompt.compose({ ...COMPOSE, traits, surfaces: ['terminal'] })
-      expect(drawn.sections.some(s => s.id === 'stretch:guide')).toBe(false)
-    }
-    const main = await $.prompt.compose({ ...COMPOSE, traits: [], surfaces: ['terminal'] })
-    expect(main.sections.some(s => s.id === 'stretch:guide')).toBe(true)
   })
 })

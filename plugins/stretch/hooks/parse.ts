@@ -10,7 +10,8 @@
 // that never closes; braces closed with no `|`; and a long form that reads as template syntax, a
 // single token with no space or one with `=` before its first space (`{{name|upper}}`,
 // `{{cite web|url=...}}`). An empty long form leaves the short form as plain text, and an empty
-// short form leaves the long form as plain text.
+// short form leaves the long form as plain text. A stretch used as a section label (alone on its
+// line, its short form no sentence) is written open, its long form as plain text.
 
 export type Segment = string | Stretch
 
@@ -225,7 +226,68 @@ function parseFull(input: string): { root: Segment[]; spans: [number, number][] 
 }
 
 export function parse(text: string): Segment[] {
-  return parseFull(text).root
+  return openLabels(parseFull(text).root, true, true)
+}
+
+// What may stand beside a label on its line: a quote mark, a bullet or list number, a heading's
+// hashes and emphasis before it; emphasis and a colon, either way round, after it.
+const LABEL_HEAD = /^[ \t]*(?:>[ \t]*)*(?:(?:[-+*]|\d+[.)])[ \t]+)?(?:#{1,6}[ \t]+)?[*_]*[ \t]*$/
+const LABEL_TAIL = /^[ \t]*(?:[*_]*:?|:?[*_]*)[ \t]*$/
+
+/**
+ * `segments` with each stretch used as a label written open: its long form in its place, no link.
+ * A label is a stretch alone on its line (a paragraph of its own included) whose short form does
+ * not read as a sentence: a question or one ending in a colon is a label there. The start and end
+ * of the reply are line edges; a long form's are not.
+ */
+function openLabels(segments: Segment[], isAtLineStart: boolean, isAtLineEnd: boolean): Segment[] {
+  const out: Segment[] = []
+  const push = (part: Segment) => {
+    const last = out.at(-1)
+    if (typeof part === 'string' && typeof last === 'string') out[out.length - 1] = last + part
+    else out.push(part)
+  }
+  // The text between the stretch at `i` and the edge of its line, or null when another stretch or
+  // the edge of a long form lies between.
+  const headOf = (i: number): string | null => {
+    const prev = segments[i - 1]
+    if (prev === undefined) return isAtLineStart ? '' : null
+    if (typeof prev !== 'string') return null
+    if (prev.includes('\n')) return prev.slice(prev.lastIndexOf('\n') + 1)
+    return i - 1 === 0 && isAtLineStart ? prev : null
+  }
+  const tailOf = (i: number): string | null => {
+    const next = segments[i + 1]
+    if (next === undefined) return isAtLineEnd ? '' : null
+    if (typeof next !== 'string') return null
+    if (next.includes('\n')) return next.slice(0, next.indexOf('\n'))
+    return i + 1 === segments.length - 1 && isAtLineEnd ? next : null
+  }
+
+  segments.forEach((part, i) => {
+    if (typeof part === 'string' || !isOpenable(part) || part.long === undefined) {
+      push(part)
+      return
+    }
+    part.long = openLabels(part.long, false, false)
+    const head = headOf(i)
+    const tail = tailOf(i)
+    const isAlone = head !== null && tail !== null && LABEL_HEAD.test(head) && LABEL_TAIL.test(tail)
+    if (isAlone && !isSentence(part.short)) part.long.forEach(push)
+    else push(part)
+  })
+
+  return out
+}
+
+/**
+ * Whether a short form reads as a sentence: four words or more, ending in a full stop or an
+ * exclamation mark. "Why." and "Why does it fail?" are labels.
+ */
+function isSentence(short: string): boolean {
+  const text = short.trim()
+
+  return /[.!]["')\]*_]*$/.test(text) && text.split(/\s+/).length >= 4
 }
 
 function assignKeys(segments: Segment[], parent: string | undefined): void {

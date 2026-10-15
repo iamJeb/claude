@@ -2,6 +2,7 @@ import type { On } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
+import { guide } from '../hooks/guide'
 import { layout, widthOf } from '../hooks/layout'
 import { parse, stretches } from '../hooks/parse'
 
@@ -233,7 +234,8 @@ describe('state', () => {
       return { text: e.text, context: e.context }
     })
     await $.prompt.submit({ text: 'hi', wait: false, origin: { kind: 'composer' } })
-    expect(ctx).toBeUndefined()
+    // The first prompt carries the guide alone, with no line about opens.
+    expect(ctx).toEqual([guide(150)])
   })
 
   test('an open is reported when the short form holds a noncharacter', async ($, on) => {

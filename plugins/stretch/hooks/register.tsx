@@ -4,16 +4,21 @@
 // There is deliberately no classic.MessageDisplay hook. On 2.1.300 a display filter that hides
 // long forms while a reply streams also strips the markup from the text AssistantMessage later
 // receives, so no stretch could become clickable (cc-stretch issue #3). While a reply streams, a
-// stretch whose closing braces have not arrived shows as literal text until they do.
+// stretch whose closing braces have not arrived shows as literal text until they do: the engine
+// draws the streaming text itself, and AssistantMessage first sees a block once it has landed.
+//
+// The guide rides on the prompt as context rather than in the system prompt: where an organization
+// manages Claude Code, prompt.compose passes over the plugins a person installs.
 
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput, SessionMessage } from 'claude-code'
 
-import { GUIDE } from './guide'
+import { guide, lastSentIn, OFF_NOTE, settingsOf } from './guide'
+import type { Sent, Settings } from './guide'
 import { stripMarkers } from './layout'
 import { closeAfter, codeSpanEnd, isLinkable, isOpenable, KEY_SEPARATOR, normalize, paragraphsOf, parentOf, parse, stretches, writeOpen } from './parse'
 import type { Segment, Stretch } from './parse'
-import type { ReplyPost, ReplyProps, Tint } from './reply'
+import type { Bulk, ReplyPost, ReplyProps, Tint } from './reply'
 
 const openStretches = atom({ plugin: 'stretch', key: 'open' } as const, [])
 const seen = atom({ plugin: 'stretch', key: 'seen' } as const, [])
@@ -22,6 +27,14 @@ const stretchOrder = atom({ plugin: 'stretch', key: 'order' } as const, { order:
 const newestReply = atom({ plugin: 'stretch', key: 'newest' } as const, '')
 const drawnReplies = atom({ plugin: 'stretch', key: 'drawn' } as const, [])
 const latestReplies = atom({ plugin: 'stretch', key: 'latest' } as const, [])
+const bulkAction = atom({ plugin: 'stretch', key: 'bulk' } as const, { id: 0, action: 'open', requestIds: [] })
+
+// The $.store key holding whether the reader turned stretch off; absent means on.
+const ENABLED = 'enabled'
+
+export const USAGE =
+  'Usage: /stretch on | off | open-all | close-all. on and off decide whether replies use the markup, and last across sessions; ' +
+  'open-all and close-all open or close every stretch in the latest reply.'
 
 export const FULLSCREEN_NOTE =
   'stretch: these replies are drawn fully open because clicks need the fullscreen renderer. ' +
@@ -43,22 +56,37 @@ const HUES = BASE.dark.length
 // Links the plugin draws are answered by the plugin and never followed; a reserved name resolves nowhere.
 export const HREF = 'https://stretch.invalid/'
 
-export const register: Register = on => {
-  on('prompt.compose', async ($, e, next) => {
-    const composed = await next(e)
-    // Only the main conversation's prompt: not a teammate's render, and not /context's measurement.
-    if (e.surfaces.length === 0 || e.traits.includes('teammate') || e.traits.includes('analysis')) return composed
+export const register: Register = (on, options) => {
+  const settings: Settings = settingsOf(options)
 
-    return { sections: [...composed.sections, { id: 'stretch:guide', text: GUIDE, scope: 'session' }] }
+  on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: 'stretch',
+      description: 'Turn stretch replies on or off, or open or close every stretch in the latest reply',
+      argumentHint: '[on|off|open-all|close-all]',
+    })
+    return next(e)
   })
 
+  on('command.run', { command: 'stretch' }, async ($, e) => ({ text: await runCommand($, e.args.trim().toLowerCase()) }))
+
   on('prompt.submit', async ($, e, next) => {
-    // Every prompt ends the reply the opens belonged to, whatever sent it.
+    // The /stretch command leaves the latest reply as it was, so open-all and close-all can act on it.
+    if (e.command?.name === 'stretch') return next(e)
+    // Every other prompt ends the reply the opens belonged to, whatever sent it.
     const [entries, latest] = await Promise.all([read($, seen), read($, latestReplies)])
     await update($, latestReplies, () => [])
     await update($, seen, () => [])
     await update($, newestReply, () => '')
-    if (e.origin.kind !== 'composer') return next(e)
+
+    // Only what a person sends gets the guide: not a headless run, a notification, a peer or a schedule,
+    // whose replies are read where no stretch is drawn.
+    if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') return next(e)
+
+    const isOn = await isEnabled($)
+    const note = await guideNote($, isOn, settings.shortWords)
+    const context = [...(e.context ?? []), ...(note === undefined ? [] : [note])]
+    if (e.origin.kind !== 'composer' || !isOn) return note === undefined ? next(e) : next({ ...e, context })
 
     const written = stretches(parse(stripMarkers(lastReply(await $.session.messages()))))
       .filter(isLinkable)
@@ -66,14 +94,15 @@ export const register: Register = on => {
     // Only opens in the latest reply count, and only for stretches that reply wrote.
     const opened = entries.filter(entry => latest.includes(entry.requestId) && written.includes(entry.short)).map(entry => entry.short)
     const line = contextLine(opened, written)
-    if (line === undefined) return next(e)
+    if (line === undefined) return note === undefined ? next(e) : next({ ...e, context })
 
-    return next({ ...e, context: [...(e.context ?? []), line] })
+    return next({ ...e, context: [...context, line] })
   }).catch(($, e, next) => next(e))
 
   // A finished tool group folds to the engine's one-line summary with a link to unfold it. A live
   // group, or one holding an error, is drawn as the engine draws it.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    if (!settings.foldTools) return next(e)
     const isFinished = !e.props.isActive && e.props.calls.every(call => !call.isRunning && !call.isErrored && !call.isInterrupted)
     if (!canPress(e) || !isFinished) return next(e)
 
@@ -145,18 +174,26 @@ export const register: Register = on => {
       // Fullscreen terminal: a paragraph holding a stretch is drawn by a Client that takes the
       // clicks; the rest is the engine's own markdown.
       const { Box, Client, Markdown, Text } = $.ui.resolve(e)
-      const [{ order, count }, newest] = await Promise.all([read($, memberOf(stretchOrder, { requestId: e.requestId })), read($, newestReply)])
+      const [{ order, count }, newest, bulk] = await Promise.all([
+        read($, memberOf(stretchOrder, { requestId: e.requestId })),
+        read($, newestReply),
+        read($, bulkAction),
+      ])
+      // An open-all or close-all reaches the Clients of the reply it was aimed at.
+      const aimed: Bulk | undefined = bulk.requestIds.includes(e.requestId) ? { id: bulk.id, action: bulk.action } : undefined
       const isLight =
         Object.keys(order).length > 0 &&
         (await $.config.list().catch(() => [])).some(row => row.key === 'theme' && String(row.value).startsWith('light'))
       const palette = isLight ? PALETTES.light : PALETTES.dark
       const drawn = await Promise.all(
         paragraphsOf(text).map(async (paragraph, i) => {
-          if (!paragraph.hasStretch) return <Markdown text={paragraph.text} />
+          // A paragraph whose only stretches are labels is drawn with them open.
+          if (!paragraph.hasStretch) return <Markdown text={paragraph.text.includes('{{') ? writeOpen(parse(paragraph.text)) : paragraph.text} />
           const key = `paragraph-${i}`
           const open = await read($, memberOf(openStretches, { requestId: `${e.requestId}#${key}` }))
           const tints = tintsOf(order, key, newest === e.requestId ? count - 1 : -1, palette)
-          return <Client key={key} module="./reply.tsx" props={{ text: paragraph.text, open, tints } satisfies ReplyProps} width="100%" />
+          const props: ReplyProps = { text: paragraph.text, open, tints, ...(aimed !== undefined && { bulk: aimed }) }
+          return <Client key={key} module="./reply.tsx" props={props} width="100%" />
         }),
       )
       return (
@@ -191,8 +228,9 @@ export const register: Register = on => {
     if (post === undefined) return next(e)
     if (post.mounted === true) await noteDrawn($, e.requestId)
     await update($, memberOf(openStretches, { requestId: `${e.requestId}#${e.element}` }), () => post.open)
-    const { opened } = post
+    const { opened, openedAll } = post
     if (opened !== undefined) await update($, seen, list => record(list, e.requestId, opened.short))
+    if (openedAll !== undefined) await update($, seen, list => openedAll.reduce((kept, short) => record(kept, e.requestId, short), list))
 
     const here = `${e.element}#`
     await update($, memberOf(stretchOrder, { requestId: e.requestId }), ({ order, count }) => {
@@ -287,12 +325,63 @@ async function noteDrawn($: EngineInterface, requestId: string): Promise<void> {
 function replyPostOf(data: unknown): ReplyPost | undefined {
   if (typeof data !== 'object' || data === null || !('open' in data) || !Array.isArray(data.open)) return undefined
   const open = data.open.filter((key): key is string => typeof key === 'string')
-  const mounted = 'mounted' in data && data.mounted === true ? ({ mounted: true } as const) : {}
+  const all = 'openedAll' in data && Array.isArray(data.openedAll) ? data.openedAll.filter((short): short is string => typeof short === 'string') : undefined
+  const extra = { ...('mounted' in data && data.mounted === true && { mounted: true as const }), ...(all !== undefined && { openedAll: all }) }
   const opened: unknown = 'opened' in data ? data.opened : undefined
-  if (typeof opened !== 'object' || opened === null || !('short' in opened) || !('key' in opened)) return { open, ...mounted }
+  if (typeof opened !== 'object' || opened === null || !('short' in opened) || !('key' in opened)) return { open, ...extra }
   const { short, key } = opened
 
-  return typeof short === 'string' && typeof key === 'string' ? { open, opened: { short, key }, ...mounted } : { open, ...mounted }
+  return typeof short === 'string' && typeof key === 'string' ? { open, opened: { short, key }, ...extra } : { open, ...extra }
+}
+
+/** Whether the reader has stretch on: anything but a stored false. */
+async function isEnabled($: EngineInterface): Promise<boolean> {
+  return (await $.store.get(ENABLED).catch(() => undefined)) !== false
+}
+
+/** Runs `/stretch <word>` and answers the line it prints. */
+async function runCommand($: EngineInterface, word: string): Promise<string> {
+  if (word === 'on' || word === 'off') {
+    await $.store.set(ENABLED, word === 'on')
+    return word === 'on'
+      ? 'stretch is on. Your next message brings Claude the guide again, and replies use the markup from then on.'
+      : 'stretch is off. Your next message tells Claude to stop using the markup; stretches already drawn still open.'
+  }
+  if (word === 'open-all' || word === 'close-all') {
+    const latest = await read($, latestReplies)
+    if (latest.length === 0) return 'stretch: no reply with clickable stretches has been drawn since your last message.'
+    const action: Bulk['action'] = word === 'open-all' ? 'open' : 'close'
+    await update($, bulkAction, was => ({ id: was.id + 1, action, requestIds: [...latest] }))
+    return word === 'open-all' ? 'Opened every stretch in the latest reply.' : 'Closed every stretch in the latest reply.'
+  }
+  const state = (await isEnabled($)) ? 'on' : 'off'
+  const unknown = word === '' ? '' : `"${word}" is not a /stretch option. `
+
+  return `${unknown}stretch is ${state}. ${USAGE}`
+}
+
+/**
+ * What the next prompt carries for the model about the markup: the guide where the conversation
+ * the next request is built from holds none (a new session, a /clear, a compaction) or holds the
+ * off note or another word count after it; the off note where stretch is off and a guide stands
+ * last. Undefined when nothing needs saying, or when the conversation cannot be read.
+ */
+export async function guideNote($: EngineInterface, isOn: boolean, shortWords: number): Promise<string | undefined> {
+  const messages: unknown = await $.session.messages({ as: 'api' }).catch(() => undefined)
+  if (!Array.isArray(messages)) return undefined
+  let last: Sent | undefined
+  for (const message of messages as unknown[]) {
+    if (typeof message !== 'object' || message === null || !('role' in message) || !('content' in message)) return undefined
+    if (!Array.isArray(message.content)) return undefined
+    if (message.role !== 'user') continue
+    for (const block of message.content as unknown[]) {
+      const text = typeof block === 'object' && block !== null && 'text' in block && typeof block.text === 'string' ? block.text : ''
+      last = lastSentIn(text) ?? last
+    }
+  }
+  if (isOn) return last?.kind === 'guide' && last.words === shortWords ? undefined : guide(shortWords)
+
+  return last?.kind === 'guide' ? OFF_NOTE : undefined
 }
 
 /** The text of the model's last reply: its rows after the person's last prompt. */

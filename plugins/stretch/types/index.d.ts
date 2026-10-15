@@ -15,6 +15,8 @@ declare module 'claude-code' {
       drawn: string[]
       /** Request ids of replies first drawn since the last prompt: the latest reply. */
       latest: string[]
+      /** The last /stretch open-all or close-all: its number, which way, and the request ids of the reply it opens or closes. */
+      bulk: { id: number; action: 'open' | 'close'; requestIds: string[] }
     }
   }
 }

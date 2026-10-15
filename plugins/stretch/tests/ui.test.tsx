@@ -113,15 +113,24 @@ test('a reply without a stretch is left to the engine', async ($, on) => {
   await ui.unmount()
 })
 
-test('the system prompt carries the guide while something draws', async ($, on) => {
+test('the first prompt carries the guide, and the system prompt does not', async ($, on) => {
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' }] }))
+  on('session.messages', () => ({ value: [] }))
+  let context: readonly string[] | undefined
+  on('prompt.submit', ($, e) => {
+    context = e.context
+    return { text: e.text, context: e.context }
+  })
+  await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'composer' } })
+  const guide = context?.[0]
+  expect(guide).toContain('150 words')
+  expect(guide).toContain('commit message')
   const drawn = await $.prompt.compose({ ...COMPOSE, surfaces: ['terminal'] })
-  const guide = drawn.sections.at(-1)
-  expect(guide?.id).toBe('stretch:guide')
-  expect(guide?.text).toContain('150 words')
-  expect(guide?.text).toContain('commit message')
-  const headless = await $.prompt.compose({ ...COMPOSE, surfaces: [] })
-  expect(headless.sections.some(s => s.id === 'stretch:guide')).toBe(false)
+  expect(drawn.sections.some(s => s.text.includes('Expandable phrases'))).toBe(false)
+  // A headless or SDK run reads its reply where no stretch is drawn, so it gets no guide.
+  context = ['unset']
+  await $.prompt.submit({ text: 'hello', wait: false, origin: { kind: 'sdk' } })
+  expect(context).toBeUndefined()
 })
 
 test('the next prompt says which stretches were opened and which were not', async ($, on) => {
