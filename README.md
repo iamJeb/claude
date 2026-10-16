@@ -13,7 +13,7 @@ Replies come back short, and the detail is one click away. See [plugins/stretch]
 
 ![A reply lands short, a click opens a phrase in place, a click on the chevron folds it back](plugins/stretch/demo.gif)
 
-<p align="center"><sub><i>The status line at the bottom is <a href="statusline/">statusline</a>, also in this repo.</i></sub></p>
+<p align="center"><i>&#8593; The status line at the bottom is <a href="statusline/">statusline</a>, the quota meter also in this repo &#8593;</i></p>
 
 ```
 /plugin install stretch --marketplace iamJeb/claude
