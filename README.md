@@ -24,6 +24,8 @@ Keeps Claude Code replies short and puts the detail one click away. Replies land
 
 ![stretch demo](plugins/stretch/demo.gif)
 
+The status line at the bottom of the recording is [statusline](statusline/) from the table above.
+
 ```
 /plugin install stretch --marketplace iamJeb/claude
 /tui fullscreen

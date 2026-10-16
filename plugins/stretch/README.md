@@ -6,6 +6,8 @@ With stretch installed, Claude writes every reply so it reads complete at its sh
 
 ![A reply lands short, a click opens a phrase in place, « folds it back](demo.gif)
 
+The status line at the bottom of the recording is [statusline](../../statusline/), the quota meter from this same repo. It is a separate install and stretch does not need it.
+
 ## What you get
 
 ### Shorter replies
