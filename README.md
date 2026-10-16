@@ -1,34 +1,33 @@
 # claude
 
-Portable [Claude Code](https://claude.com/claude-code) setup, one folder per tool. Each folder
-has its own README and, where it applies, an `install.sh` you can pipe straight from GitHub on
-any machine.
+Portable [Claude Code](https://claude.com/claude-code) setup. Each tool has its own folder, its own README and its own install line.
 
 | Tool | What it is | Install |
 |---|---|---|
 | [statusline](statusline/) | Quota-aware status line: context / 5h / weekly meters with pace ticks, per-window burn history, and a bar attributing what is filling the context | `curl -fsSL https://raw.githubusercontent.com/iamJeb/claude/main/statusline/install.sh \| bash` |
-| [stretch](plugins/stretch/) | Plugin: replies short by default, click a phrase to expand it in place; finished tool groups fold to one line | `/plugin install stretch --marketplace iamJeb/claude` |
-
-## Setting up a new machine with Claude Code
-
-Tell Claude: *"install the statusline from github.com/iamJeb/claude"*.
-
-Note for Claude: install a tool by running its `install.sh` one-liner from the table above, not by
-hand-copying files — the installer puts the script in `~/.claude/`, merges the right `statusLine`
-block into `~/.claude/settings.json` (keeping every other setting and saving a backup), and is
-safe to re-run to update. Requires `curl` and Python 3.8+ (`python3`, or the `py` launcher on Windows, where the one-liner runs in Git Bash).
+| [stretch](plugins/stretch/) | Plugin: replies short by default, click a phrase to open it in place; finished tool groups fold to one line | `/plugin install stretch --marketplace iamJeb/claude` |
 
 ## stretch
 
-Keeps Claude Code replies short and puts the detail one click away. Replies land short, you click a phrase to open more in place, and Claude is told what you opened. See [plugins/stretch](plugins/stretch/) for what to expect.
+Replies come back short, and the detail is one click away. See [plugins/stretch](plugins/stretch/).
 
-![stretch demo](plugins/stretch/demo.gif)
+![A reply lands short, a click opens a phrase in place, a click on the chevron folds it back](plugins/stretch/demo.gif)
 
-The status line at the bottom of the recording is [statusline](statusline/) from the table above.
+<p align="center"><sub><i>The status line at the bottom is <a href="statusline/">statusline</a>, also in this repo.</i></sub></p>
 
 ```
 /plugin install stretch --marketplace iamJeb/claude
 /tui fullscreen
 ```
 
-This repo is public — nothing here should contain keys, hostnames, or client details.
+## statusline
+
+One question: will my quota last the week? Install or update on any machine:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/iamJeb/claude/main/statusline/install.sh | bash
+```
+
+On a new machine you can also tell Claude: *"install the statusline from github.com/iamJeb/claude"*. The installer puts the scripts in `~/.claude/`, merges the `statusLine` block into `~/.claude/settings.json` (keeping every other setting and saving a backup), and is safe to re-run to update. Needs `curl` and Python 3.8+ (`python3`, or the `py` launcher on Windows, where the one-liner runs in Git Bash). Claude should run that installer rather than hand-copy the files.
+
+This repo is public. Nothing here should contain keys, hostnames, or client details. MIT licensed, see [LICENSE](LICENSE).
