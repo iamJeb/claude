@@ -25,6 +25,8 @@ A stretch Claude uses as a label, alone on its own line and not written as a sen
 
 Wherever clicking is not possible, every stretch is drawn open and you see the whole reply.
 
+Nothing that leaves the chat carries the markup. Claude is told to keep it out of files, commits, pull requests, issues, work item comments, emails, chat messages, prompts for other agents or sessions, commands, API calls and anything printed for you to paste. The plugin also refuses any tool call whose input holds a stretch, and Claude sends the call again written plain. A copy from the screen takes only what is drawn, so a block meant for pasting is written plain inside a code fence.
+
 ## Good to know
 
 It saves reading time, not tokens. Claude still writes every level of detail, so a reply costs about what it did before.
@@ -39,7 +41,7 @@ The plugin hook API is early access and changes between Claude Code releases, so
 
 ## The /stretch command
 
-`/stretch off` turns the markup off, and your next reply is plain. `/stretch on` turns it back on. The choice is remembered across sessions.
+`/stretch off` turns the markup off, and your next reply is plain. `/stretch on` turns it back on. The choice is remembered across sessions. Off also lifts the tool call guard, which is how a file that has to contain the markup, such as this plugin's own tests, gets written.
 
 In the fullscreen terminal, `/stretch open-all` opens every stretch in the latest reply, and `/stretch close-all` folds them all back. Stretches opened this way count as read.
 
@@ -85,6 +87,8 @@ claude plugin update stretch@iamjeb-claude
 ```
 
 ## Changes
+
+0.2.2 on 2026-10-17. The markup is kept inside the chat: the guide now lists every place it must not go, from files and commits to messages for other agents and anything printed for pasting, and the plugin refuses a tool call whose input carries a stretch so Claude resends it plain.
 
 0.2.1 on 2026-10-15. Long forms now carry real depth, and the guide shows the sentence-ending pattern that gives them room.
 

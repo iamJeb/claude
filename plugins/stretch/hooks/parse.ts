@@ -322,6 +322,37 @@ export function stretches(segments: Segment[]): Stretch[] {
   return segments.flatMap(segment => (typeof segment === 'string' ? [] : [segment, ...stretches(segment.long ?? [])]))
 }
 
+/** Whether `text` holds markup the parser would draw as a stretch: template syntax and code are left as text, so they do not count. */
+export function hasMarkup(text: string): boolean {
+  const plain = normalize(text)
+  return plain.includes('{{') && writeOpen(parse(plain)) !== plain
+}
+
+// The keys of a tool call's event that are the engine's, not the tool's arguments.
+const RESERVED = new Set(['tool', 'tool_use_id', 'consent'])
+
+/**
+ * The dotted path of the first string in a tool call's arguments that holds stretch markup, walking
+ * nested objects and arrays, or undefined when none does.
+ */
+export function markupIn(input: unknown, path = ''): string | undefined {
+  if (typeof input === 'string') return hasMarkup(input) ? path : undefined
+  if (Array.isArray(input)) {
+    for (const [i, item] of input.entries()) {
+      const found = markupIn(item, `${path}[${i}]`)
+      if (found !== undefined) return found
+    }
+    return undefined
+  }
+  if (typeof input !== 'object' || input === null) return undefined
+  for (const [key, value] of Object.entries(input)) {
+    if (path === '' && RESERVED.has(key)) continue
+    const found = markupIn(value, path === '' ? key : `${path}.${key}`)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
 /** A reply with every stretch drawn as its long form. */
 export function writeOpen(parts: Segment[]): string {
   return parts.map(part => (typeof part === 'string' ? part : part.long === undefined ? part.short : writeOpen(part.long))).join('')

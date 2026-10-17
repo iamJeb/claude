@@ -16,7 +16,7 @@ import type { EngineInterface, Register, RenderInput, SessionMessage } from 'cla
 import { guide, lastSentIn, OFF_NOTE, settingsOf } from './guide'
 import type { Sent, Settings } from './guide'
 import { stripMarkers } from './layout'
-import { closeAfter, codeSpanEnd, isLinkable, isOpenable, KEY_SEPARATOR, normalize, paragraphsOf, parentOf, parse, stretches, writeOpen } from './parse'
+import { closeAfter, codeSpanEnd, isLinkable, isOpenable, KEY_SEPARATOR, markupIn, normalize, paragraphsOf, parentOf, parse, stretches, writeOpen } from './parse'
 import type { Segment, Stretch } from './parse'
 import type { Bulk, ReplyPost, ReplyProps, Tint } from './reply'
 
@@ -97,6 +97,17 @@ export const register: Register = (on, options) => {
     if (line === undefined) return note === undefined ? next(e) : next({ ...e, context })
 
     return next({ ...e, context: [...context, line] })
+  }).catch(($, e, next) => next(e))
+
+  // No stretch leaves the chat. A tool call whose input carries the markup is refused with a line
+  // the model can act on, since a file, a commit, a message to a person or another agent, or a
+  // request to an API would show the raw braces or, copied from the screen, lose the folded text.
+  // Turning stretch off lifts the guard, which is how a file that must hold the markup gets written.
+  on('tool.call', async ($, e, next) => {
+    if (!(await isEnabled($))) return next(e)
+    const where = markupIn(e)
+    if (where === undefined) return next(e)
+    return { deny: `${$.plugin.name}: ${e.tool} input "${where}" carries {{short|long}} markup, which belongs only in chat replies. Send the same call again written plain, with the long forms in place.` }
   }).catch(($, e, next) => next(e))
 
   // A finished tool group folds to the engine's one-line summary with a link to unfold it. A live
