@@ -53,9 +53,12 @@ if os.name == "nt":
     cmd = interp + " " + fwd(os.path.abspath(os.path.expanduser("~/.claude/statusline.py")))
 else:
     cmd = "python3 ~/.claude/statusline.py"
-# refreshInterval 10: the countdowns tick per minute and the context sparkline
-# samples on change, so a slower refresh makes the line look frozen.
-want = {"type": "command", "command": cmd, "padding": 0, "refreshInterval": 10}
+# refreshInterval 30: the line also redraws on every tool call and turn, so the
+# timer only keeps the countdowns moving while a session sits idle. On Windows
+# every timer tick spawns a bash.exe per session, and a fast tick across several
+# sessions can trip the MSYS runtime's startup race (git-for-windows #6368),
+# which then kills every new bash on the machine until the shared region resets.
+want = {"type": "command", "command": cmd, "padding": 0, "refreshInterval": 30}
 s = {}
 if os.path.exists(p):
     try:
