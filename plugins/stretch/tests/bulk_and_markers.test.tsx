@@ -83,8 +83,18 @@ const pressOn = async (ui: Mounted, phrase: string, key = 'paragraph-0') => {
   await ui.pointer({ type: 'up', x, y, button: 'left', in: key })
   await ui.advance(2000)
 }
-const footer = async (ui: Mounted) => (await ui.find({ key: 'all' }))?.text ?? ''
-const count = async (ui: Mounted) => (await ui.findAll({ type: 'Text' })).find(piece => piece.props?.dimColor === true && /of \d+ open$/.test(piece.text ?? ''))?.text
+/** The one row a links Client draws, as its text. */
+const linksRow = async (ui: { drawn: Mounted['drawn'] }, key: string) => textOf(await ui.drawn({ in: key }))
+/** Presses the label in a links Client's row, at the cell its first character takes. */
+const pressLink = async (ui: { drawn: Mounted['drawn']; pointer: Mounted['pointer'] }, key: string, label: string) => {
+  const row = await linksRow(ui, key)
+  const at = row.indexOf(label)
+  if (at === -1) throw new Error(`"${label}" is not drawn:\n${row}`)
+  const x = widthOf(row.slice(0, at))
+  await ui.pointer({ type: 'down', x, y: 0, button: 'left', in: key })
+  await ui.pointer({ type: 'up', x, y: 0, button: 'left', in: key })
+}
+const footer = async (ui: Mounted) => ((await ui.find({ key: 'all' })) === undefined ? '' : linksRow(ui, 'all'))
 
 describe('open all and close all under a reply', () => {
   test('the footer opens and closes every stretch of the block, nested ones too, and they count as read', async ($, on) => {
@@ -97,22 +107,19 @@ describe('open all and close all under a reply', () => {
       ],
     )
     const ui = await mount($, REPLY)
-    expect(await footer(ui)).toBe(`[▸ open all](${OPEN_ALL})`)
-    expect(await count(ui)).toBe('none of 3 open')
+    expect(await footer(ui)).toBe('▸ open all  none of 3 open')
 
-    await ui.press({ key: 'all', link: { href: OPEN_ALL } })
+    await pressLink(ui, 'all', '▸ open all')
     await ui.advance(100)
     expect((await rowsOf(ui)).join(' ')).toContain('because the key hashes only the manifest « alone «.')
     expect((await rowsOf(ui, 'paragraph-1')).join(' ')).toContain('adds the lockfile to the key «')
-    expect(await footer(ui)).toBe(`[« close all](${CLOSE_ALL})`)
-    expect(await count(ui)).toBe('3 of 3 open')
+    expect(await footer(ui)).toBe('« close all  3 of 3 open')
 
-    await ui.press({ key: 'all', link: { href: CLOSE_ALL } })
+    await pressLink(ui, 'all', '« close all')
     await ui.advance(100)
     expect((await rowsOf(ui)).join('\n')).toBe('It fails on a stale cache».')
     expect((await rowsOf(ui, 'paragraph-1')).join('\n')).toBe('The fix is small.')
-    expect(await footer(ui)).toBe(`[▸ open all](${OPEN_ALL})`)
-    expect(await count(ui)).toBe('none of 3 open')
+    expect(await footer(ui)).toBe('▸ open all  none of 3 open')
 
     await submit($)
     expect(contexts[0]).toEqual(['Stretch: in your last reply the reader opened "on a stale cache", "one file", "is small".'])
@@ -121,25 +128,28 @@ describe('open all and close all under a reply', () => {
 
   test('a press on one stretch moves the count and shows both links', async $ => {
     const ui = await mount($, REPLY)
-    expect(await count(ui)).toBe('none of 3 open')
+    expect(await footer(ui)).toBe('▸ open all  none of 3 open')
     await pressOn(ui, 'is small', 'paragraph-1')
-    expect(await count(ui)).toBe('1 of 3 open')
-    expect(await footer(ui)).toBe(`[▸ open all](${OPEN_ALL}) · [« close all](${CLOSE_ALL})`)
+    expect(await footer(ui)).toBe('▸ open all · « close all  1 of 3 open')
+    // The press lands on close all, past open all and the dot between them.
+    await pressLink(ui, 'all', '« close all')
+    await ui.advance(100)
+    expect(await footer(ui)).toBe('▸ open all  none of 3 open')
+    await pressOn(ui, 'is small', 'paragraph-1')
     await pressOn(ui, '«', 'paragraph-1')
-    expect(await count(ui)).toBe('none of 3 open')
+    expect(await footer(ui)).toBe('▸ open all  none of 3 open')
     await ui.unmount()
   })
 
   test('a block with one stretch has no footer, and the footer aims at its own reply alone', async $ => {
     const one = await mount($, 'The fix {{is small|adds the lockfile to the key}}.', 'reply-one')
     expect(await one.find({ key: 'all' })).toBeUndefined()
-    expect(await count(one)).toBeUndefined()
     const other = await mount($, REPLY, 'reply-other')
-    await other.press({ key: 'all', link: { href: OPEN_ALL } })
+    await pressLink(other, 'all', '▸ open all')
     await one.advance(100)
     await other.advance(100)
     expect((await rowsOf(one)).join('\n')).toBe('The fix is small.')
-    expect(await count(other)).toBe('3 of 3 open')
+    expect(await footer(other)).toBe('« close all  3 of 3 open')
     await one.unmount()
     await other.unmount()
   })
@@ -161,9 +171,40 @@ describe('open all and close all under a reply', () => {
   })
 
   test('the links follow the count', () => {
-    expect(footerLinks(0, 3)).toBe(`[▸ open all](${OPEN_ALL})`)
-    expect(footerLinks(1, 3)).toBe(`[▸ open all](${OPEN_ALL}) · [« close all](${CLOSE_ALL})`)
-    expect(footerLinks(3, 3)).toBe(`[« close all](${CLOSE_ALL})`)
+    expect(footerLinks(0, 3)).toEqual([{ href: OPEN_ALL, label: '▸ open all' }])
+    expect(footerLinks(1, 3)).toEqual([
+      { href: OPEN_ALL, label: '▸ open all' },
+      { href: CLOSE_ALL, label: '« close all' },
+    ])
+    expect(footerLinks(3, 3)).toEqual([{ href: CLOSE_ALL, label: '« close all' }])
+  })
+
+  test('neither the footer nor the tool group toggle shows an address', async ($, on) => {
+    on('ui.render', { component: 'ToolGroup' }, ($, e) => {
+      const { Text } = $.ui.resolve(e)
+      return <Text>{e.props.isExpanded ? 'every call' : 'folded'}</Text>
+    })
+    const ui = await mount($, REPLY)
+    const row = await footer(ui)
+    expect(row).toBe('▸ open all  none of 3 open')
+    expect(row).not.toContain('stretch.invalid')
+    expect(row).not.toContain('https')
+    expect(JSON.stringify(await ui.drawn({ in: 'all' }))).not.toContain('stretch.invalid')
+    expect(await ui.find({ type: 'Markdown' })).toBeUndefined()
+    await ui.unmount()
+
+    const call = { tool_use_id: 'toolu_1', tool: 'Bash', input: {}, isRunning: false, isErrored: false, isInterrupted: false }
+    const group = await $.ui.mount({ plugin: 'stretch', surface: 'terminal', component: 'ToolGroup', props: { calls: [call], isActive: false, isExpanded: true }, requestId: 'g-plain', viewport: FULLSCREEN })
+    for (const label of ['▸ show', '▾ fold']) {
+      const toggle = await linksRow(group, 'tools')
+      expect(toggle).toContain(label)
+      expect(toggle).not.toContain('stretch.invalid')
+      expect(toggle).not.toContain('https')
+      expect(JSON.stringify(await group.drawn({ in: 'tools' }))).not.toContain('stretch.invalid')
+      await pressLink(group, 'tools', label)
+    }
+    expect(await group.find({ type: 'Markdown' })).toBeUndefined()
+    await group.unmount()
   })
 })
 
@@ -275,20 +316,23 @@ describe('show all and fold all over tool groups', () => {
       return <Text>{e.props.isExpanded ? 'every call' : 'folded'}</Text>
     })
   const isOpen = async (ui: Group) => (await ui.find({ text: 'every call' })) !== undefined
-  const toggle = async (ui: Group) => (await ui.find({ key: 'tools' }))?.text ?? ''
-  const press = (ui: Group, which: 'group' | 'groups-open' | 'groups-close') => ui.press({ key: 'tools', link: { href: HREF + which } })
+  const toggle = (ui: Group) => linksRow(ui, 'tools')
+  const LABELS = { group: '▸ show', 'groups-open': '▸ show all', 'groups-close': '▾ fold all' } as const
+  // The group's own toggle reads show or fold by its state, so the row is read first and the press lands on the label drawn.
+  const press = async (ui: Group, which: keyof typeof LABELS) =>
+    pressLink(ui, 'tools', which === 'group' && (await toggle(ui)).startsWith('▾') ? '▾ fold' : LABELS[which])
 
   test('show all opens every group, a group folds alone, fold all folds them, and a group opens alone', async ($, on) => {
     engineDraws(on)
     const one = await mountGroup($, 'group-1')
     const two = await mountGroup($, 'group-2')
     expect(await isOpen(one)).toBe(false)
-    expect(await toggle(one)).toBe(`[▸ show](${HREF}group) · [▸ show all](${HREF}groups-open)`)
+    expect(await toggle(one)).toBe('▸ show · ▸ show all')
 
     await press(one, 'groups-open')
     expect(await isOpen(one)).toBe(true)
     expect(await isOpen(two)).toBe(true)
-    expect(await toggle(two)).toBe(`[▾ fold](${HREF}group) · [▾ fold all](${HREF}groups-close)`)
+    expect(await toggle(two)).toBe('▾ fold · ▾ fold all')
 
     await press(one, 'group')
     expect(await isOpen(one)).toBe(false)

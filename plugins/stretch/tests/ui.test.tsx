@@ -13,7 +13,6 @@ const REPLY = [
 
 const FULLSCREEN = { columns: 100, rows: 40, isFullscreen: true }
 const MAIN_SCREEN = { columns: 100, rows: 40, isFullscreen: false }
-const HREF = 'https://stretch.invalid/'
 const FIRST = 'paragraph-0'
 const COMPOSE = { model: 'claude-opus-5-5', promptModel: 'claude-opus-5-5', tools: [], outputStyle: null, traits: [] } as const
 
@@ -43,6 +42,18 @@ const rowsOf = async (ui: Mounted, key = FIRST): Promise<string[]> => {
   return (Array.isArray(children) ? children.flat(Infinity) : [children]).map(textOf)
 }
 const textIn = async (ui: Mounted, key = FIRST) => (await rowsOf(ui, key)).join('\n')
+/** The one row a links Client draws, as its text. */
+const linksRow = async (ui: { drawn: Mounted['drawn'] }, key: string) => textOf(await ui.drawn({ in: key }))
+/** Presses the label in a links Client's row, at the cell its first character takes. */
+const pressLink = async (ui: { drawn: Mounted['drawn']; pointer: Mounted['pointer'] }, key: string, label: string) => {
+  const row = await linksRow(ui, key)
+  const at = row.indexOf(label)
+  if (at === -1) throw new Error(`"${label}" is not drawn:
+${row}`)
+  const x = widthOf(row.slice(0, at))
+  await ui.pointer({ type: 'down', x, y: 0, button: 'left', in: key })
+  await ui.pointer({ type: 'up', x, y: 0, button: 'left', in: key })
+}
 const pressOn = async (ui: Mounted, phrase: string, { key = FIRST, last = false } = {}) => {
   const rows = await rowsOf(ui, key)
   const y = last ? rows.findLastIndex(row => row.includes(phrase)) : rows.findIndex(row => row.includes(phrase))
@@ -182,10 +193,11 @@ describe('tool groups', () => {
     engineDraws(on)
     const ui = await mountGroup($, { isActive: false, isErrored: false })
     expect(await ui.find({ text: 'Ran 1 shell command' })).toBeDefined()
-    expect((await ui.find({ key: 'tools' }))?.text).toContain('▸ show')
-    await ui.press({ key: 'tools', link: { href: HREF + 'group' } })
+    expect(await linksRow(ui, 'tools')).toBe('▸ show · ▸ show all')
+    await pressLink(ui, 'tools', '▸ show')
     expect(await ui.find({ text: 'every call' })).toBeDefined()
-    await ui.press({ key: 'tools', link: { href: HREF + 'group' } })
+    expect(await linksRow(ui, 'tools')).toBe('▾ fold · ▾ fold all')
+    await pressLink(ui, 'tools', '▾ fold')
     expect(await ui.find({ text: 'Ran 1 shell command' })).toBeDefined()
     await ui.unmount()
   })

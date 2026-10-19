@@ -42,7 +42,8 @@ const pressOn = async (ui: Mounted, phrase: string, key = 'paragraph-0') => {
   if (y === -1) throw new Error(`"${phrase}" is not drawn:\n${rows.join('\n')}`)
   await pressAt(ui, widthOf((rows[y] ?? '').slice(0, (rows[y] ?? '').indexOf(phrase))), y, key)
 }
-const count = async (ui: Mounted) => (await ui.findAll({ type: 'Text' })).find(piece => piece.props?.dimColor === true && /of \d+ open$/.test(piece.text ?? ''))?.text
+// The count is the note of the footer's links row, after the two spaces that follow the links.
+const count = async (ui: Mounted) => ((await ui.find({ key: 'all' })) === undefined ? undefined : textOf(await ui.drawn({ in: 'all' })).split('  ').pop())
 
 describe('the » mark stays with its link', () => {
   test('a row never starts with the » or the full stop that touches it', () => {
@@ -190,7 +191,18 @@ describe('tool groups after a bulk', () => {
       return <Text>{e.props.isExpanded ? 'every call' : 'folded'}</Text>
     })
   const isOpen = async (ui: Group) => (await ui.find({ text: 'every call' })) !== undefined
-  const press = (ui: Group, which: string) => ui.press({ key: 'tools', link: { href: HREF + which } })
+  const toggle = async (ui: Group) => textOf(await ui.drawn({ in: 'tools' }))
+  // A press lands on the label's first cell in the one row the links Client draws.
+  const press = async (ui: Group, which: 'group' | 'groups-open' | 'groups-close') => {
+    const row = await toggle(ui)
+    const label = which === 'group' ? (row.startsWith('▾') ? '▾ fold' : '▸ show') : which === 'groups-open' ? '▸ show all' : '▾ fold all'
+    const at = row.indexOf(label)
+    if (at === -1) throw new Error(`"${label}" is not drawn:\n${row}`)
+    const x = widthOf(row.slice(0, at))
+    await ui.pointer({ type: 'down', x, y: 0, button: 'left', in: 'tools' })
+    await ui.pointer({ type: 'up', x, y: 0, button: 'left', in: 'tools' })
+    expect(row).not.toContain('stretch.invalid')
+  }
 
   test('own toggle, fold all, own toggle again, a late group, and groups that never fold', async ($, on) => {
     engineDraws(on)
@@ -201,7 +213,11 @@ describe('tool groups after a bulk', () => {
     expect(await isOpen(one)).toBe(false)
     await press(one, 'group')
     expect(await isOpen(one)).toBe(true)
+    // Show all is drawn only beside a folded group, so the group is folded by its own toggle first.
+    await press(one, 'group')
+    expect(await isOpen(one)).toBe(false)
     await press(one, 'groups-open')
+    expect(await isOpen(one)).toBe(true)
     const late = await mountGroup($, 'g-late')
     expect(await isOpen(late)).toBe(true)
     await press(one, 'groups-close')

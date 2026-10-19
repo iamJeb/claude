@@ -16,6 +16,7 @@ import type { EngineInterface, Register, RenderInput, SessionMessage } from 'cla
 import { DEFAULT_SHORT_WORDS, guide, lastSentIn, MAX_SHORT_WORDS, MIN_SHORT_WORDS, OFF_NOTE, settingsOf, wordsOf } from './guide'
 import type { Sent, Settings } from './guide'
 import { stripMarkers } from './layout'
+import type { Link, LinksPost, LinksProps } from './links'
 import { closeAfter, codeSpanEnd, hasNested, isLinkable, isOpenable, KEY_SEPARATOR, markupIn, NESTED_MARK, normalize, paragraphsOf, parentOf, parse, stretches, writeOpen } from './parse'
 import type { Segment, Stretch } from './parse'
 import type { Bulk, ReplyPost, ReplyProps, Tint } from './reply'
@@ -134,24 +135,10 @@ export const register: Register = (on, options) => {
     const own = memberOf(openGroups, e)
     const [mine, all] = await Promise.all([read($, own), read($, groupsAll)])
     const isOpen = groupIsOpen(mine, all)
-    const { Box, Markdown } = $.ui.resolve(e)
-    const press = async (href: string) => {
-      if (href === GROUP) {
-        // The group's own toggle flips what the reader sees now, and outlasts the bulk it was pressed under.
-        const [was, now] = await Promise.all([read($, own), read($, groupsAll)])
-        await update($, own, () => ({ isOpen: !groupIsOpen(was, now), at: now.id }))
-      } else if (href === GROUPS_OPEN || href === GROUPS_CLOSE) {
-        await update($, groupsAll, was => ({ id: was.id + 1, isOpen: href === GROUPS_OPEN }))
-      }
-    }
-    const toggle = (
-      <Markdown
-        key="tools"
-        text={isOpen ? `[▾ fold](${GROUP}) · [▾ fold all](${GROUPS_CLOSE})` : `[▸ show](${GROUP}) · [▸ show all](${GROUPS_OPEN})`}
-        pressableLinks={[GROUP, GROUPS_OPEN, GROUPS_CLOSE]}
-        onLinkPress={link => void press(link.href)}
-      />
-    )
+    const { Box, Client } = $.ui.resolve(e)
+    // The row is a Client of the plugin's own, so no address shows; a press posts the address to
+    // the ui.message hook below, which finds the group by the same request id this draw has.
+    const toggle = <Client key="tools" module="./links.tsx" props={{ links: groupLinks(isOpen) } satisfies LinksProps} />
     const drawn = await next({ ...e, props: { ...e.props, isExpanded: isOpen } })
 
     return isOpen ? (
@@ -237,16 +224,9 @@ export const register: Register = (on, options) => {
       // A block holding two or more stretches ends in a line that opens or closes them all and counts the open ones.
       const total = all.filter(isLinkable).length
       const opened = counted.reduce((sum, { opened }) => sum + opened, 0)
-      const bulkPress = async (href: string) => {
-        const action: Bulk['action'] | undefined = href === OPEN_ALL ? 'open' : href === CLOSE_ALL ? 'close' : undefined
-        if (action === undefined) return
-        await update($, bulkAction, was => ({ id: was.id + 1, action, requestIds: [e.requestId] }))
-      }
+      // A press on it posts the address to the ui.message hook below, which aims the bulk at this reply.
       const footer = total >= 2 && (
-        <Box flexDirection="row" gap={1}>
-          <Markdown key="all" text={footerLinks(opened, total)} pressableLinks={[OPEN_ALL, CLOSE_ALL]} onLinkPress={link => void bulkPress(link.href)} />
-          <Text dimColor>{`${opened === 0 ? 'none' : opened} of ${total} open`}</Text>
-        </Box>
+        <Client key="all" module="./links.tsx" props={{ links: footerLinks(opened, total), note: `${opened === 0 ? 'none' : opened} of ${total} open` } satisfies LinksProps} />
       )
       return (
         <Box flexDirection="row">
@@ -277,6 +257,11 @@ export const register: Register = (on, options) => {
 
   // A paragraph's Client posts its open stretches whenever they change, and the one just opened.
   on('ui.message', async ($, e, next) => {
+    if (e.module.endsWith('links.tsx')) {
+      const href = linksPostOf(e.data)?.href
+      if (href !== undefined) await linkPressed($, href, e)
+      return next(e)
+    }
     const post = e.module.endsWith('reply.tsx') ? replyPostOf(e.data) : undefined
     if (post === undefined) return next(e)
     if (post.mounted === true) await noteDrawn($, e.requestId)
@@ -322,13 +307,55 @@ function groupIsOpen(own: { isOpen: boolean; at: number } | boolean, all: { id: 
 }
 
 /**
+ * Answers the address a links row posted. The row under a reply aims an open-all or close-all at
+ * that reply; the row beside a tool group flips the group's own toggle, the member keyed by the
+ * request id the ToolGroup draw had, or bumps the toggle over every group.
+ */
+async function linkPressed($: EngineInterface, href: string, e: Pick<RenderInput, 'requestId' | 'component'>): Promise<void> {
+  // Each row answers only the addresses it draws, so a post from one cannot move the other.
+  if (e.component === 'AssistantMessage' && (href === OPEN_ALL || href === CLOSE_ALL)) {
+    const action: Bulk['action'] = href === OPEN_ALL ? 'open' : 'close'
+    await update($, bulkAction, was => ({ id: was.id + 1, action, requestIds: [e.requestId] }))
+  } else if (e.component !== 'ToolGroup') {
+    return
+  } else if (href === GROUP) {
+    // The group's own toggle flips what the reader sees now, and outlasts the bulk it was pressed under.
+    const own = memberOf(openGroups, e)
+    const [was, now] = await Promise.all([read($, own), read($, groupsAll)])
+    await update($, own, () => ({ isOpen: !groupIsOpen(was, now), at: now.id }))
+  } else if (href === GROUPS_OPEN || href === GROUPS_CLOSE) {
+    await update($, groupsAll, was => ({ id: was.id + 1, isOpen: href === GROUPS_OPEN }))
+  }
+}
+
+/**
  * The links under a block of a reply: open all while a stretch is closed, close all while one is
  * open, both when the block is mixed.
  */
-export function footerLinks(opened: number, total: number): string {
-  const links = [...(opened < total ? [`[▸ open all](${OPEN_ALL})`] : []), ...(opened > 0 ? [`[« close all](${CLOSE_ALL})`] : [])]
+export function footerLinks(opened: number, total: number): Link[] {
+  return [
+    ...(opened < total ? [{ href: OPEN_ALL, label: '▸ open all' }] : []),
+    ...(opened > 0 ? [{ href: CLOSE_ALL, label: '« close all' }] : []),
+  ]
+}
 
-  return links.join(' · ')
+/** The links beside a tool group: show and show all while it is folded, fold and fold all while it is open. */
+export function groupLinks(isOpen: boolean): Link[] {
+  return isOpen
+    ? [
+        { href: GROUP, label: '▾ fold' },
+        { href: GROUPS_CLOSE, label: '▾ fold all' },
+      ]
+    : [
+        { href: GROUP, label: '▸ show' },
+        { href: GROUPS_OPEN, label: '▸ show all' },
+      ]
+}
+
+function linksPostOf(data: unknown): LinksPost | undefined {
+  if (typeof data !== 'object' || data === null || !('href' in data) || typeof data.href !== 'string') return undefined
+
+  return { href: data.href }
 }
 
 function tintsOf(order: Record<string, number>, paragraph: string, newest: number, palette: { soft: string; faded: string }[]): Record<string, Tint> {

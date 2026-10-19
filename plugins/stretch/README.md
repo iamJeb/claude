@@ -92,6 +92,8 @@ claude plugin update stretch@iamjeb-claude
 
 ## Changes
 
+0.3.1 on 2026-10-19. The open all, close all, show all and fold all rows are drawn by the plugin itself, so the address behind each click no longer shows beside its words. A drag that starts on one of them no longer counts as a click.
+
 0.3.0 on 2026-10-19. A reply with several stretches now ends in open all and close all links with a count of how many are open, and a stretch that holds another ends in ». Tool groups gained show all and fold all beside the per-group toggle, and `/stretch words N` sets the short reply length from the prompt.
 
 0.2.2 on 2026-10-17. The markup is kept inside the chat: the guide now lists every place it must not go, from files and commits to messages for other agents and anything printed for pasting, and the plugin refuses a tool call whose input carries a stretch so Claude resends it plain.

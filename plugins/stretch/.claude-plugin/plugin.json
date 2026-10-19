@@ -1,6 +1,6 @@
 {
   "name": "stretch",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Replies short by default; click a phrase to expand it in place, and finished tool groups fold to one line",
   "author": {
     "name": "Jon Eberly"
