@@ -322,6 +322,14 @@ export function stretches(segments: Segment[]): Stretch[] {
   return segments.flatMap(segment => (typeof segment === 'string' ? [] : [segment, ...stretches(segment.long ?? [])]))
 }
 
+/** What follows the short form of a closed stretch that holds another, so the reader sees that a click goes deeper. */
+export const NESTED_MARK = '»'
+
+/** Whether a stretch's long form holds a stretch of its own that is drawn as a link, so a click on it goes deeper. */
+export function hasNested(stretch: Stretch): boolean {
+  return stretch.long !== undefined && stretches(stretch.long).some(isLinkable)
+}
+
 /** Whether `text` holds markup the parser would draw as a stretch: template syntax and code are left as text, so they do not count. */
 export function hasMarkup(text: string): boolean {
   const plain = normalize(text)

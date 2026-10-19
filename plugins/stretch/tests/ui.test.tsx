@@ -55,14 +55,15 @@ const pressOn = async (ui: Mounted, phrase: string, { key = FIRST, last = false 
 
 test('in the fullscreen terminal a click expands a stretch in place and « collapses it', async $ => {
   const ui = await mountReply($, FULLSCREEN)
-  expect(await textIn(ui)).toBe('The build fails on a stale cache.\nBraces in code stay: {{a|b}}.')
+  // The outer stretch holds another, so its short form ends in a » until it opens.
+  expect(await textIn(ui)).toBe('The build fails on a stale cache».\nBraces in code stay: {{a|b}}.')
   expect(await hasNote(ui)).toBe(false)
   await pressOn(ui, 'on a stale cache')
   await ui.advance(2000)
   expect(await textIn(ui)).toContain('because the cache key hashes only package.json, set in one file «.')
   await pressOn(ui, '«', { last: true })
   await ui.advance(2000)
-  expect(await textIn(ui)).toBe('The build fails on a stale cache.\nBraces in code stay: {{a|b}}.')
+  expect(await textIn(ui)).toBe('The build fails on a stale cache».\nBraces in code stay: {{a|b}}.')
   await ui.unmount()
 })
 
@@ -182,9 +183,9 @@ describe('tool groups', () => {
     const ui = await mountGroup($, { isActive: false, isErrored: false })
     expect(await ui.find({ text: 'Ran 1 shell command' })).toBeDefined()
     expect((await ui.find({ key: 'tools' }))?.text).toContain('▸ show')
-    await ui.press({ key: 'tools', link: { href: HREF } })
+    await ui.press({ key: 'tools', link: { href: HREF + 'group' } })
     expect(await ui.find({ text: 'every call' })).toBeDefined()
-    await ui.press({ key: 'tools', link: { href: HREF } })
+    await ui.press({ key: 'tools', link: { href: HREF + 'group' } })
     expect(await ui.find({ text: 'Ran 1 shell command' })).toBeDefined()
     await ui.unmount()
   })

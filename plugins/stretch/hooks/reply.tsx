@@ -4,9 +4,9 @@
 import type { ClientModule, ClientSurface, TextProps } from 'claude-code'
 
 import { grow, lengthOf } from './grow'
-import { isMarkup, layout, link, linkAt, stripMarkers, tint } from './layout'
+import { dim, isMarkup, layout, link, linkAt, stripMarkers, tint } from './layout'
 import type { Row, Run } from './layout'
-import { closeAfter, isLinkable, KEY_SEPARATOR, parse, stretches, writeOpen } from './parse'
+import { closeAfter, hasNested, isLinkable, KEY_SEPARATOR, NESTED_MARK, parse, stretches, writeOpen } from './parse'
 import type { Segment, Stretch } from './parse'
 
 // Draws one paragraph of a reply that holds stretches. It runs where the reader's screen draws it,
@@ -135,7 +135,8 @@ export function fitsTree(rows: Row[]): boolean {
 
 /**
  * The paragraph as the reader sees it now: closed stretches as pressable short forms, open ones in
- * full then a «, the words each added in its tint.
+ * full then a «, the words each added in its tint. A closed stretch whose long form holds another
+ * ends in a dim », inside the link, so the reader sees that a click goes deeper.
  */
 function compose(segments: Segment[], state: State, tints: Record<string, Tint>): string {
   const write = (parts: Segment[]): string => parts.map(part => (typeof part === 'string' ? part : draw(part))).join('')
@@ -146,7 +147,7 @@ function compose(segments: Segment[], state: State, tints: Record<string, Tint>)
     const colours = tints[stretch.key]
     const paint = (word: string) => (colours === undefined || isMarkup(word) ? word : tint(colours.words, word))
     if (state.growth?.key === stretch.key) return grow(stretch.short, stretch.long, easeInOut(state.growth.progress), draw, paint)
-    if (!state.open.includes(stretch.key)) return link('open', stretch.key, stretch.short)
+    if (!state.open.includes(stretch.key)) return link('open', stretch.key, hasNested(stretch) ? `${stretch.short}${dim(NESTED_MARK)}` : stretch.short)
     const closer = link('close', stretch.key, '«')
     const long = grow(stretch.short, stretch.long, 1, draw, paint)
     return closeAfter(long, colours === undefined ? closer : tint(colours.closer, closer), '\n')

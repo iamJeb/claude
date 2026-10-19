@@ -24,16 +24,21 @@ export function lastSentIn(text: string): Sent | undefined {
 }
 
 export const DEFAULT_SHORT_WORDS = 150
-const MIN_SHORT_WORDS = 10
-const MAX_SHORT_WORDS = 2000
+export const MIN_SHORT_WORDS = 10
+export const MAX_SHORT_WORDS = 2000
 
 /** The plugin's /config settings, each at its default where missing or invalid. */
 export type Settings = { shortWords: number; foldTools: boolean }
 
+/** `value` as a short reply length: a number, or digits in a string, from 10 to 2000; undefined for anything else. */
+export function wordsOf(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : NaN
+
+  return Number.isFinite(n) && n >= MIN_SHORT_WORDS && n <= MAX_SHORT_WORDS ? Math.round(n) : undefined
+}
+
 export function settingsOf(options: Readonly<Record<string, unknown>> | undefined): Settings {
-  const words = options?.shortWords
-  const n = typeof words === 'number' ? words : typeof words === 'string' && /^\s*\d+\s*$/.test(words) ? Number(words) : NaN
-  const shortWords = Number.isFinite(n) && n >= MIN_SHORT_WORDS && n <= MAX_SHORT_WORDS ? Math.round(n) : DEFAULT_SHORT_WORDS
+  const shortWords = wordsOf(options?.shortWords) ?? DEFAULT_SHORT_WORDS
   const foldTools = typeof options?.foldTools === 'boolean' ? options.foldTools : true
 
   return { shortWords, foldTools }

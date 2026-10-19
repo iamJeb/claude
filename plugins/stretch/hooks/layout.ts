@@ -34,6 +34,8 @@ const SEP = '\ufdd1'
 const END = '\ufdd2'
 const TINT = '\ufdd3'
 const TINT_END = '\ufdd4'
+const DIM = '\ufdd5'
+const DIM_END = '\ufdd6'
 const TAB_STOP = 4
 const TAB = String.fromCharCode(9)
 const MARKDOWN_LINK = /\[([^\]\n]+)\]\(([^)\s]+)\)/y
@@ -45,12 +47,20 @@ export function stripMarkers(text: string): string {
   return text.replace(/[\ufdd0-\ufdef]/g, '')
 }
 
-/** A line's text without its tint marks, and the tint of each character left. */
-type Line = { text: string; tints: (string | undefined)[] }
+/** The tint of each character of a line, and whether it is drawn dim, once the marks are read out. */
+type Marks = { tints: (string | undefined)[]; dims: boolean[] }
+
+/** A line's text without its tint and dim marks, and the marks of each character left. */
+type Line = { text: string } & Marks
 
 /** `word` drawn in `colour`. */
 export function tint(colour: string, word: string): string {
   return `${TINT}${colour}${SEP}${word}${TINT_END}`
+}
+
+/** `word` drawn dim, inside a link as much as outside one. */
+export function dim(word: string): string {
+  return `${DIM}${word}${DIM_END}`
 }
 
 /** Whether a word is markdown syntax rather than text: a bullet, a list number, a rule, a fence, a pipe, a heading mark. */
@@ -191,16 +201,19 @@ export function widthOf(text: string): number {
 }
 
 /**
- * A line without its tint marks, so its markdown is read from the text alone: a stretch tints the
- * words it adds one at a time, so a code span or a link label can hold several. A space takes the
- * tint before it, so a tinted phrase stays one run. A tab becomes spaces to the next stop of four.
+ * A line without its tint and dim marks, so its markdown is read from the text alone: a stretch
+ * tints the words it adds one at a time, so a code span or a link label can hold several. A space
+ * takes the tint before it, so a tinted phrase stays one run. A tab becomes spaces to the next stop
+ * of four.
  */
 function untint(marked: string): Line {
-  // Most lines carry no tint and no tab: nothing to do.
-  if (!marked.includes(TINT) && !marked.includes(TAB)) return { text: marked, tints: [] }
+  // Most lines carry no tint, no dim mark and no tab: nothing to do.
+  if (!marked.includes(TINT) && !marked.includes(DIM) && !marked.includes(TAB)) return { text: marked, tints: [], dims: [] }
   let text = ''
   const tints: Line['tints'] = []
+  const dims: Line['dims'] = []
   let tinted: string | undefined
+  let isDim = false
   for (let i = 0; i < marked.length; i++) {
     const ch = marked[i] ?? ''
     const sep = ch === TINT ? marked.indexOf(SEP, i + 1) : -1
@@ -209,22 +222,35 @@ function untint(marked: string): Line {
       i = sep
     } else if (ch === TINT_END) {
       tinted = undefined
+    } else if (ch === DIM) {
+      isDim = true
+    } else if (ch === DIM_END) {
+      isDim = false
     } else if (ch === '\t') {
       const spaces = TAB_STOP - (widthOf(stripMarkers(text)) % TAB_STOP)
-      for (let k = 0; k < spaces; k++) tints.push(tinted ?? tints.at(-1))
+      for (let k = 0; k < spaces; k++) {
+        tints.push(tinted ?? tints.at(-1))
+        dims.push(isDim)
+      }
       text += ' '.repeat(spaces)
     } else {
       tints.push(ch === ' ' && tinted === undefined ? tints.at(-1) : tinted)
+      dims.push(isDim)
       text += ch
     }
   }
 
-  return { text, tints }
+  return { text, tints, dims }
 }
 
-function rowsOf({ text: line, tints }: Line, width: number): Row[] {
+/** The marks of a line from character `from` on. */
+function marksFrom({ tints, dims }: Marks, from: number): Marks {
+  return { tints: tints.slice(from), dims: dims.slice(from) }
+}
+
+function rowsOf({ text: line, tints, dims }: Line, width: number): Row[] {
   // The runs of the line's end from `rest` on.
-  const inlineOf = (rest: string, isBold = false) => inline(rest, tints.slice(line.length - rest.length), isBold)
+  const inlineOf = (rest: string, isBold = false) => inline(rest, marksFrom({ tints, dims }, line.length - rest.length), isBold)
   if (line.trim() === '') return [[]]
   if (isRule(line)) return [[{ text: '─'.repeat(Math.min(width, 60)), dim: true }]]
   // A table row keeps its columns: written as is, cut where the region ends.
@@ -245,15 +271,16 @@ function rowsOf({ text: line, tints }: Line, width: number): Row[] {
 
 /**
  * A line's inline markdown as runs: bold, italic, code spans, links, pressable phrases, each
- * character in its tint. A markdown link's label is read the same way, so a stretch inside it stays
- * pressable and its marks never show.
+ * character in its tint and dimmed where marked. A markdown link's label is read the same way, so a
+ * stretch inside it stays pressable and its marks never show.
  */
-function inline(text: string, tints: Line['tints'], isBold = false, outer: Run['link'] = undefined, extraAll: Omit<Run, 'text'> = {}): Run[] {
+function inline(text: string, marks: Marks, isBold = false, outer: Run['link'] = undefined, extraAll: Omit<Run, 'text'> = {}): Run[] {
+  const { tints, dims } = marks
   const runs: Run[] = []
   let bold = isBold
   let italic = false
   let pressable: Run['link'] = outer
-  // `chunk` starts at character `at`, and takes its tint.
+  // `chunk` starts at character `at`, and takes its tint and dimness.
   const emit = (chunk: string, at: number, extra: Omit<Run, 'text'> = {}) => {
     if (chunk === '') return
     const tint = tints[at]
@@ -262,6 +289,7 @@ function inline(text: string, tints: Line['tints'], isBold = false, outer: Run['
       ...(bold && { bold: true }),
       ...(italic && { italic: true }),
       ...(tint && { tint }),
+      ...(dims[at] === true && { dim: true }),
       ...(pressable && { link: pressable }),
       ...extraAll,
       ...extra,
@@ -313,16 +341,17 @@ function inline(text: string, tints: Line['tints'], isBold = false, outer: Run['
     const markdownLink = ch === '[' ? MARKDOWN_LINK.exec(text) : null
     if (markdownLink) {
       const label = markdownLink[1] ?? ''
-      const labelRuns = inline(label, tints.slice(i + 1), bold, pressable, { ...extraAll, underline: true, ...(italic && { italic: true }) })
+      const labelRuns = inline(label, marksFrom(marks, i + 1), bold, pressable, { ...extraAll, underline: true, ...(italic && { italic: true }) })
       labelRuns.forEach(push)
       emit(` (${stripMarkers(markdownLink[2] ?? '')})`, i + markdownLink[0].length - 1, { dim: true })
       i += markdownLink[0].length
       continue
     }
-    // Plain text up to the next character that means something here, or the next change of tint,
-    // in one piece. A surrogate pair is never special, so a cluster is not split between runs.
+    // Plain text up to the next character that means something here, or the next change of tint
+    // or dimness, in one piece. A surrogate pair is never special, so a cluster is not split
+    // between runs.
     let stop = i + 1
-    while (stop < text.length && !INLINE_SPECIAL.test(text[stop] ?? '') && tints[stop] === tints[i]) stop += 1
+    while (stop < text.length && !INLINE_SPECIAL.test(text[stop] ?? '') && tints[stop] === tints[i] && dims[stop] === dims[i]) stop += 1
     emit(text.slice(i, stop), i)
     i = stop
   }
@@ -359,33 +388,39 @@ function wrap(runs: Run[], width: number, first: string, rest: string, isDimLead
   }
 
   begin(first)
-  for (const run of runs) {
-    for (const text of run.text.split(/( +)/)) {
-      if (text === '') continue
-      if (text.trim() === '') {
-        if (isBare) continue
-        if (used + widthOf(text) <= width) put({ ...run, text })
-        else breakRow()
+  const parts = runs.flatMap(run => run.text.split(/( +)/).filter(text => text !== '').map(text => ({ run, text })))
+  const isWord = (at: number) => (parts[at]?.text.trim() ?? '') !== ''
+  parts.forEach(({ run, text }, at) => {
+    if (!isWord(at)) {
+      if (isBare) return
+      if (used + widthOf(text) <= width) put({ ...run, text })
+      else breakRow()
+      return
+    }
+    // Pieces that touch with no space between, such as a link and the » or full stop after it,
+    // read as one word, so a row that cannot take them all breaks before the first.
+    if (!isBare && !isWord(at - 1)) {
+      let whole = 0
+      for (let k = at; isWord(k); k++) whole += widthOf(parts[k]?.text ?? '')
+      if (used + whole > width && whole <= width - widthOf(rest)) breakRow()
+    }
+    let word = text
+    while (word !== '') {
+      if (used + widthOf(word) <= width) {
+        put({ ...run, text: word })
+        break
+      }
+      if (!isBare) {
+        breakRow()
         continue
       }
-      let word = text
-      while (word !== '') {
-        if (used + widthOf(word) <= width) {
-          put({ ...run, text: word })
-          break
-        }
-        if (!isBare) {
-          breakRow()
-          continue
-        }
-        // A word wider than a whole row is cut where the row ends; a row always takes one cluster.
-        const [head, tail] = cut(word, width - used, true)
-        put({ ...run, text: head })
-        breakRow()
-        word = tail
-      }
+      // A word wider than a whole row is cut where the row ends; a row always takes one cluster.
+      const [head, tail] = cut(word, width - used, true)
+      put({ ...run, text: head })
+      breakRow()
+      word = tail
     }
-  }
+  })
   rows.push(row)
 
   return rows

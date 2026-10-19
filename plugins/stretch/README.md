@@ -19,7 +19,9 @@ Claude writes each reply so it reads complete at its shortest. Where there is mo
 
 Your next message tells Claude which stretches you opened. If you skipped one that matters to your next question, Claude says it again.
 
-Finished groups of tool calls fold to one line. Anything still running, or anything that failed, stays open.
+In the fullscreen terminal, reply text with two or more stretches between one tool call and the next ends in a line with open all, close all, or both, and a count such as 2 of 5 open. A stretch whose detail holds a further stretch ends in », so you can see that a click goes deeper. Stretches you open all at once count as read.
+
+Finished groups of tool calls fold to one line, with show and show all beside it to unfold that group or every finished group; fold and fold all put them back. Anything still running, or anything that failed, stays open.
 
 A stretch Claude uses as a label, alone on its own line and not written as a sentence, such as a heading word, a question or a phrase ending in a colon, is drawn open from the start.
 
@@ -45,11 +47,13 @@ The plugin hook API is early access and changes between Claude Code releases, so
 
 In the fullscreen terminal, `/stretch open-all` opens every stretch in the latest reply, and `/stretch close-all` folds them all back. Stretches opened this way count as read.
 
-`/stretch` on its own shows whether stretch is on and how to use the command.
+`/stretch words 80` makes 80 the most words a reply should take with every stretch closed, from 10 to 2000, and keeps it across sessions ahead of the `/config` setting. `/stretch words` shows the count in force and where it comes from, and `/stretch words default` goes back to the setting. The change reaches Claude with your next message.
+
+`/stretch` on its own shows whether stretch is on, the word count, and how to use the command.
 
 ## Settings
 
-Two settings show up in `/config`. Short reply length (`shortWords`, 150 by default) is the most words a reply should take with every stretch closed; a value below 10 or above 2000 falls back to 150. Fold finished tool groups (`foldTools`, on by default) can be turned off if you would rather see every tool call as Claude Code draws it.
+Two settings show up in `/config`. Short reply length (`shortWords`, 150 by default) is the most words a reply should take with every stretch closed; a value below 10 or above 2000 falls back to 150, and a count set with `/stretch words` takes precedence. Fold finished tool groups (`foldTools`, on by default) can be turned off if you would rather see every tool call as Claude Code draws it.
 
 ## Install
 
@@ -87,6 +91,8 @@ claude plugin update stretch@iamjeb-claude
 ```
 
 ## Changes
+
+0.3.0 on 2026-10-19. A reply with several stretches now ends in open all and close all links with a count of how many are open, and a stretch that holds another ends in ». Tool groups gained show all and fold all beside the per-group toggle, and `/stretch words N` sets the short reply length from the prompt.
 
 0.2.2 on 2026-10-17. The markup is kept inside the chat: the guide now lists every place it must not go, from files and commits to messages for other agents and anything printed for pasting, and the plugin refuses a tool call whose input carries a stretch so Claude resends it plain.
 

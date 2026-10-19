@@ -13,16 +13,18 @@
 import { atom, memberOf, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderInput, SessionMessage } from 'claude-code'
 
-import { guide, lastSentIn, OFF_NOTE, settingsOf } from './guide'
+import { DEFAULT_SHORT_WORDS, guide, lastSentIn, MAX_SHORT_WORDS, MIN_SHORT_WORDS, OFF_NOTE, settingsOf, wordsOf } from './guide'
 import type { Sent, Settings } from './guide'
 import { stripMarkers } from './layout'
-import { closeAfter, codeSpanEnd, isLinkable, isOpenable, KEY_SEPARATOR, markupIn, normalize, paragraphsOf, parentOf, parse, stretches, writeOpen } from './parse'
+import { closeAfter, codeSpanEnd, hasNested, isLinkable, isOpenable, KEY_SEPARATOR, markupIn, NESTED_MARK, normalize, paragraphsOf, parentOf, parse, stretches, writeOpen } from './parse'
 import type { Segment, Stretch } from './parse'
 import type { Bulk, ReplyPost, ReplyProps, Tint } from './reply'
 
 const openStretches = atom({ plugin: 'stretch', key: 'open' } as const, [])
 const seen = atom({ plugin: 'stretch', key: 'seen' } as const, [])
-const openGroups = atom({ plugin: 'stretch', key: 'groups' } as const, false)
+// A group with no toggle of its own stands at -1, before any groupsAll id, so it follows groupsAll.
+const openGroups = atom({ plugin: 'stretch', key: 'groups' } as const, { isOpen: false, at: -1 })
+const groupsAll = atom({ plugin: 'stretch', key: 'groupsAll' } as const, { id: 0, isOpen: false })
 const stretchOrder = atom({ plugin: 'stretch', key: 'order' } as const, { order: {}, count: 0 })
 const newestReply = atom({ plugin: 'stretch', key: 'newest' } as const, '')
 const drawnReplies = atom({ plugin: 'stretch', key: 'drawn' } as const, [])
@@ -31,10 +33,13 @@ const bulkAction = atom({ plugin: 'stretch', key: 'bulk' } as const, { id: 0, ac
 
 // The $.store key holding whether the reader turned stretch off; absent means on.
 const ENABLED = 'enabled'
+// The $.store key holding the word count /stretch words set; absent means the /config setting or its default.
+const SHORT_WORDS = 'shortWords'
 
 export const USAGE =
-  'Usage: /stretch on | off | open-all | close-all. on and off decide whether replies use the markup, and last across sessions; ' +
-  'open-all and close-all open or close every stretch in the latest reply.'
+  'Usage: /stretch on | off | open-all | close-all | words N. on and off decide whether replies use the markup, and last across sessions; ' +
+  'open-all and close-all open or close every stretch in the latest reply; words N sets how many words a short reply may take ' +
+  `(${MIN_SHORT_WORDS} to ${MAX_SHORT_WORDS}), words alone shows the count, and words default forgets the one set here.`
 
 export const FULLSCREEN_NOTE =
   'stretch: these replies are drawn fully open because clicks need the fullscreen renderer. ' +
@@ -55,6 +60,12 @@ const HUES = BASE.dark.length
 
 // Links the plugin draws are answered by the plugin and never followed; a reserved name resolves nowhere.
 export const HREF = 'https://stretch.invalid/'
+// The links under a reply that holds two or more stretches, and on a folded or unfolded tool group.
+const OPEN_ALL = `${HREF}open-all`
+const CLOSE_ALL = `${HREF}close-all`
+const GROUP = `${HREF}group`
+const GROUPS_OPEN = `${HREF}groups-open`
+const GROUPS_CLOSE = `${HREF}groups-close`
 
 export const register: Register = (on, options) => {
   const settings: Settings = settingsOf(options)
@@ -62,13 +73,15 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'stretch',
-      description: 'Turn stretch replies on or off, or open or close every stretch in the latest reply',
-      argumentHint: '[on|off|open-all|close-all]',
+      description: 'Turn stretch replies on or off, open or close every stretch in the latest reply, or set the short reply length',
+      argumentHint: '[on|off|open-all|close-all|words N]',
     })
     return next(e)
   })
 
-  on('command.run', { command: 'stretch' }, async ($, e) => ({ text: await runCommand($, e.args.trim().toLowerCase()) }))
+  // A /config value at the default reads as the default.
+  const isConfigured = wordsOf(options?.shortWords) !== undefined && settings.shortWords !== DEFAULT_SHORT_WORDS
+  on('command.run', { command: 'stretch' }, async ($, e) => ({ text: await runCommand($, e.args.trim().toLowerCase(), settings, isConfigured) }))
 
   on('prompt.submit', async ($, e, next) => {
     // The /stretch command leaves the latest reply as it was, so open-all and close-all can act on it.
@@ -84,7 +97,7 @@ export const register: Register = (on, options) => {
     if (e.origin.kind !== 'composer' && e.origin.kind !== 'bridge') return next(e)
 
     const isOn = await isEnabled($)
-    const note = await guideNote($, isOn, settings.shortWords)
+    const note = await guideNote($, isOn, await shortWordsOf($, settings))
     const context = [...(e.context ?? []), ...(note === undefined ? [] : [note])]
     if (e.origin.kind !== 'composer' || !isOn) return note === undefined ? next(e) : next({ ...e, context })
 
@@ -110,22 +123,33 @@ export const register: Register = (on, options) => {
     return { deny: `${$.plugin.name}: ${e.tool} input "${where}" carries {{short|long}} markup, which belongs only in chat replies. Send the same call again written plain, with the long forms in place.` }
   }).catch(($, e, next) => next(e))
 
-  // A finished tool group folds to the engine's one-line summary with a link to unfold it. A live
-  // group, or one holding an error, is drawn as the engine draws it.
+  // A finished tool group folds to the engine's one-line summary with a link to unfold it, beside
+  // one that unfolds or folds every finished group at once. A live group, or one holding an error,
+  // is drawn as the engine draws it.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     if (!settings.foldTools) return next(e)
     const isFinished = !e.props.isActive && e.props.calls.every(call => !call.isRunning && !call.isErrored && !call.isInterrupted)
     if (!canPress(e) || !isFinished) return next(e)
 
-    const open = memberOf(openGroups, e)
-    const isOpen = await read($, open)
+    const own = memberOf(openGroups, e)
+    const [mine, all] = await Promise.all([read($, own), read($, groupsAll)])
+    const isOpen = groupIsOpen(mine, all)
     const { Box, Markdown } = $.ui.resolve(e)
+    const press = async (href: string) => {
+      if (href === GROUP) {
+        // The group's own toggle flips what the reader sees now, and outlasts the bulk it was pressed under.
+        const [was, now] = await Promise.all([read($, own), read($, groupsAll)])
+        await update($, own, () => ({ isOpen: !groupIsOpen(was, now), at: now.id }))
+      } else if (href === GROUPS_OPEN || href === GROUPS_CLOSE) {
+        await update($, groupsAll, was => ({ id: was.id + 1, isOpen: href === GROUPS_OPEN }))
+      }
+    }
     const toggle = (
       <Markdown
         key="tools"
-        text={`[${isOpen ? '▾ fold' : '▸ show'}](${HREF})`}
-        pressableLinks={[HREF]}
-        onLinkPress={() => update($, open, was => !was)}
+        text={isOpen ? `[▾ fold](${GROUP}) · [▾ fold all](${GROUPS_CLOSE})` : `[▸ show](${GROUP}) · [▸ show all](${GROUPS_OPEN})`}
+        pressableLinks={[GROUP, GROUPS_OPEN, GROUPS_CLOSE]}
+        onLinkPress={link => void press(link.href)}
       />
     )
     const drawn = await next({ ...e, props: { ...e.props, isExpanded: isOpen } })
@@ -196,22 +220,40 @@ export const register: Register = (on, options) => {
         Object.keys(order).length > 0 &&
         (await $.config.list().catch(() => [])).some(row => row.key === 'theme' && String(row.value).startsWith('light'))
       const palette = isLight ? PALETTES.light : PALETTES.dark
-      const drawn = await Promise.all(
+      const counted = await Promise.all(
         paragraphsOf(text).map(async (paragraph, i) => {
           // A paragraph whose only stretches are labels is drawn with them open.
-          if (!paragraph.hasStretch) return <Markdown text={paragraph.text.includes('{{') ? writeOpen(parse(paragraph.text)) : paragraph.text} />
+          if (!paragraph.hasStretch) return { node: <Markdown text={paragraph.text.includes('{{') ? writeOpen(parse(paragraph.text)) : paragraph.text} />, opened: 0 }
           const key = `paragraph-${i}`
           const open = await read($, memberOf(openStretches, { requestId: `${e.requestId}#${key}` }))
           const tints = tintsOf(order, key, newest === e.requestId ? count - 1 : -1, palette)
           const props: ReplyProps = { text: paragraph.text, open, tints, ...(aimed !== undefined && { bulk: aimed }) }
-          return <Client key={key} module="./reply.tsx" props={props} width="100%" />
+          // The open list holds only keys of linkable stretches, nested ones among them.
+          const opened = stretches(parse(paragraph.text)).filter(stretch => isLinkable(stretch) && open.includes(stretch.key)).length
+          return { node: <Client key={key} module="./reply.tsx" props={props} width="100%" />, opened }
         }),
+      )
+      const drawn = counted.map(({ node }) => node)
+      // A block holding two or more stretches ends in a line that opens or closes them all and counts the open ones.
+      const total = all.filter(isLinkable).length
+      const opened = counted.reduce((sum, { opened }) => sum + opened, 0)
+      const bulkPress = async (href: string) => {
+        const action: Bulk['action'] | undefined = href === OPEN_ALL ? 'open' : href === CLOSE_ALL ? 'close' : undefined
+        if (action === undefined) return
+        await update($, bulkAction, was => ({ id: was.id + 1, action, requestIds: [e.requestId] }))
+      }
+      const footer = total >= 2 && (
+        <Box flexDirection="row" gap={1}>
+          <Markdown key="all" text={footerLinks(opened, total)} pressableLinks={[OPEN_ALL, CLOSE_ALL]} onLinkPress={link => void bulkPress(link.href)} />
+          <Text dimColor>{`${opened === 0 ? 'none' : opened} of ${total} open`}</Text>
+        </Box>
       )
       return (
         <Box flexDirection="row">
           <Text>{marker}</Text>
           <Box flexDirection="column" flexShrink={1} gap={1}>
             {drawn}
+            {footer}
           </Box>
         </Box>
       )
@@ -272,6 +314,23 @@ export function contextLine(openedList: readonly string[], writtenList: readonly
   return `Stretch: in your last reply the reader opened none of ${quote(unopened)}. They may have read only the short forms; where clicks cannot land (a terminal not in fullscreen, VS Code, the phone app) every stretch was drawn open.`
 }
 
+/** Whether a tool group is unfolded: its own toggle while that was pressed under the current bulk, else the bulk. */
+function groupIsOpen(own: { isOpen: boolean; at: number } | boolean, all: { id: number; isOpen: boolean }): boolean {
+  // State written by 0.2.2 holds a plain boolean, kept as the reader's own choice.
+  if (typeof own === 'boolean') return own
+  return own.at >= all.id ? own.isOpen : all.isOpen
+}
+
+/**
+ * The links under a block of a reply: open all while a stretch is closed, close all while one is
+ * open, both when the block is mixed.
+ */
+export function footerLinks(opened: number, total: number): string {
+  const links = [...(opened < total ? [`[▸ open all](${OPEN_ALL})`] : []), ...(opened > 0 ? [`[« close all](${CLOSE_ALL})`] : [])]
+
+  return links.join(' · ')
+}
+
 function tintsOf(order: Record<string, number>, paragraph: string, newest: number, palette: { soft: string; faded: string }[]): Record<string, Tint> {
   const here = `${paragraph}#`
   return Object.fromEntries(
@@ -284,7 +343,10 @@ function tintsOf(order: Record<string, number>, paragraph: string, newest: numbe
   )
 }
 
-/** A reply as desktop markdown: each closed stretch a link, each open one its long form then a «. */
+/**
+ * A reply as desktop markdown: each closed stretch a link, ending in a » when it holds another, each
+ * open one its long form then a «.
+ */
 function linkedMarkdown(parts: Segment[], open: readonly string[], all: Stretch[], links: string[]): string {
   return parts
     .map(part => {
@@ -299,7 +361,7 @@ function linkedMarkdown(parts: Segment[], open: readonly string[], all: Stretch[
       }
       const href = `${HREF}open/${index}`
       links.push(href)
-      return `[${labelOf(part.short)}](${href})`
+      return `[${labelOf(part.short)}${hasNested(part) ? NESTED_MARK : ''}](${href})`
     })
     .join('')
 }
@@ -350,8 +412,38 @@ async function isEnabled($: EngineInterface): Promise<boolean> {
   return (await $.store.get(ENABLED).catch(() => undefined)) !== false
 }
 
-/** Runs `/stretch <word>` and answers the line it prints. */
-async function runCommand($: EngineInterface, word: string): Promise<string> {
+/** The word count /stretch words set, when one is stored and within bounds. */
+async function storedWords($: EngineInterface): Promise<number | undefined> {
+  return wordsOf(await $.store.get(SHORT_WORDS).catch(() => undefined))
+}
+
+/** The word count in force: the one /stretch words set, else the /config setting or its default. */
+async function shortWordsOf($: EngineInterface, settings: Settings): Promise<number> {
+  return (await storedWords($)) ?? settings.shortWords
+}
+
+/** Runs `/stretch words <rest>` and answers the line it prints. `isConfigured`: whether /config holds a valid count. */
+async function runWords($: EngineInterface, rest: string, settings: Settings, isConfigured: boolean): Promise<string> {
+  const configured = isConfigured ? 'the shortWords setting in /config' : 'the default'
+  if (rest === '') {
+    const stored = await storedWords($)
+    return `stretch: a short reply is ${stored ?? settings.shortWords} words at most, from ${stored === undefined ? configured : '/stretch words'}.`
+  }
+  if (rest === 'default') {
+    await $.store.delete(SHORT_WORDS)
+    return `stretch: the count set by /stretch words is forgotten. A short reply is ${settings.shortWords} words at most, from ${configured}.`
+  }
+  const words = wordsOf(rest)
+  if (words === undefined) return `stretch: the word count must be a whole number from ${MIN_SHORT_WORDS} to ${MAX_SHORT_WORDS}. Nothing changed.`
+  await $.store.set(SHORT_WORDS, words)
+
+  return `stretch: a short reply is now ${words} words at most. Your next message brings Claude the guide with the new count.`
+}
+
+/** Runs `/stretch <args>` and answers the line it prints. */
+async function runCommand($: EngineInterface, args: string, settings: Settings, isConfigured: boolean): Promise<string> {
+  const [word = '', ...rest] = args.split(/\s+/)
+  if (word === 'words') return runWords($, rest.join(' '), settings, isConfigured)
   if (word === 'on' || word === 'off') {
     await $.store.set(ENABLED, word === 'on')
     return word === 'on'
@@ -368,7 +460,7 @@ async function runCommand($: EngineInterface, word: string): Promise<string> {
   const state = (await isEnabled($)) ? 'on' : 'off'
   const unknown = word === '' ? '' : `"${word}" is not a /stretch option. `
 
-  return `${unknown}stretch is ${state}. ${USAGE}`
+  return `${unknown}stretch is ${state}, and a short reply is ${await shortWordsOf($, settings)} words at most. ${USAGE}`
 }
 
 /**

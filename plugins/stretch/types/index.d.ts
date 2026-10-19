@@ -5,8 +5,10 @@ declare module 'claude-code' {
       open: StateFamily<string[]>
       /** The stretches the reader opened since their last prompt: the reply's request id and the short form. */
       seen: { requestId: string; short: string }[]
-      /** Per tool group: whether the reader unfolded it. */
-      groups: StateFamily<boolean>
+      /** Per tool group: how the reader last set its own toggle, and the `groupsAll` id current then. It counts only while that id is still current. */
+      groups: StateFamily<{ isOpen: boolean; at: number }>
+      /** The last show all or fold all over tool groups: its number, and which way. A group with no own toggle since follows it. */
+      groupsAll: { id: number; isOpen: boolean }
       /** Per reply: the count each open stretch was opened at (picks its colour), and the next count. */
       order: StateFamily<{ order: Record<string, number>; count: number }>
       /** The request id of the reply where a stretch was opened last, until the next prompt; empty for none. */
