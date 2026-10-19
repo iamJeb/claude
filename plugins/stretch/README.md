@@ -13,6 +13,17 @@ A Claude Code plugin. Replies come back short, and the detail is one click away.
 
 Needs Claude Code 2.1.275 or later and a fullscreen terminal or the desktop app. Details under [Install](#install).
 
+## What you get
+
+- Replies that read complete at their shortest, with the depth folded behind phrases you click.
+- Click a phrase to open it in place, click « to fold it back. A » on a phrase means a click goes deeper.
+- An open all and close all line under any reply with several stretches, with a count of how many are open.
+- Claude is told which stretches you opened, and repeats what you skipped when it matters.
+- Finished tool calls fold to one line, with show, show all, fold and fold all beside them.
+- `/stretch off` and `/stretch on`, `/stretch open-all` and `/stretch close-all`, `/stretch words N`.
+- Nothing that leaves the chat carries the markup: the plugin refuses a tool call that holds a stretch.
+- Two `/config` settings: the short reply length and whether tool groups fold.
+
 ## How it works
 
 Claude writes each reply so it reads complete at its shortest. Where there is more to say, it folds the extra behind a phrase. That phrase is a stretch. Click it and the detail opens in place. Click « and it folds back.
@@ -37,7 +48,7 @@ Clicks work in Claude Code's fullscreen terminal layout and in the desktop app. 
 
 The instructions that teach Claude the markup arrive with your first message, and again after a compaction or `/clear`. That way they load even where an organization manages Claude Code settings. Headless runs (`claude -p`), background task notifications and scheduled prompts never get them, so those replies stay plain.
 
-While a reply is still streaming, a stretch shows as raw `{{short|long}}` text until its closing braces arrive. The same raw text shows anywhere the plugin is not loaded, such as a transcript pasted elsewhere. Claude is told to keep the markup out of files, commit messages, emails and tool input.
+While a reply is still streaming, a stretch shows as raw `{{short|long}}` text until its closing braces arrive. The same raw text shows anywhere the plugin is not loaded, such as a transcript pasted elsewhere.
 
 The plugin hook API is early access and changes between Claude Code releases, so an update can break stretch until I catch up.
 
