@@ -1,9 +1,8 @@
-// Stretch replies for Claude Code. Adapted from cc-stretch (https://github.com/pro-vi/cc-stretch),
-// MIT License, Copyright (c) 2026 pro-vi; see ../LICENSE-cc-stretch.
+// Stretch replies for Claude Code.
 //
 // There is deliberately no classic.MessageDisplay hook. On 2.1.300 a display filter that hides
 // long forms while a reply streams also strips the markup from the text AssistantMessage later
-// receives, so no stretch could become clickable (cc-stretch issue #3). While a reply streams, a
+// receives, so no stretch could become clickable. While a reply streams, a
 // stretch whose closing braces have not arrived shows as literal text until they do: the engine
 // draws the streaming text itself, and AssistantMessage first sees a block once it has landed.
 //
@@ -11,12 +10,17 @@
 // manages Claude Code, prompt.compose passes over the plugins a person installs.
 
 import { atom, memberOf, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderInput, SessionMessage } from 'claude-code'
+import type { EngineInterface, Register, RenderInput, RenderNode, SessionMessage } from 'claude-code'
 
+import { contrastOn, hex, mix } from './contrast'
+import type { Hex, Rgb } from './contrast'
 import { DEFAULT_SHORT_WORDS, guide, lastSentIn, MAX_SHORT_WORDS, MIN_SHORT_WORDS, OFF_NOTE, settingsOf, wordsOf } from './guide'
 import type { Sent, Settings } from './guide'
-import { stripMarkers } from './layout'
+import { isWebLink, stripMarkers, targetsIn } from './layout'
+import type { Action } from './layout'
 import type { Link, LinksPost, LinksProps } from './links'
+import { isColour, isSameLook, MARK_NAMES, marksSetting, storedLook, TINTED } from './look'
+import type { DrawnLook, Highlight, Look, Mark } from './look'
 import { closeAfter, codeSpanEnd, hasNested, isLinkable, isOpenable, KEY_SEPARATOR, markupIn, NESTED_MARK, normalize, paragraphsOf, parentOf, parse, stretches, writeOpen } from './parse'
 import type { Segment, Stretch } from './parse'
 import type { Bulk, ReplyPost, ReplyProps, Tint } from './reply'
@@ -31,6 +35,157 @@ const newestReply = atom({ plugin: 'stretch', key: 'newest' } as const, '')
 const drawnReplies = atom({ plugin: 'stretch', key: 'drawn' } as const, [])
 const latestReplies = atom({ plugin: 'stretch', key: 'latest' } as const, [])
 const bulkAction = atom({ plugin: 'stretch', key: 'bulk' } as const, { id: 0, action: 'open', requestIds: [] })
+const askedStretch = atom({ plugin: 'stretch', key: 'ask' } as const, null)
+const lettering = atom({ plugin: 'stretch', key: 'lettering' } as const, null)
+// The toolbar's state is plugin state, not module state: as of Claude Code 2.1.312 each setting
+// written reloads the plugin, and a save outlives the reload.
+const pickedLook = atom({ plugin: 'stretch', key: 'look' } as const, null)
+const toolbarShown = atom({ plugin: 'stretch', key: 'toolbar' } as const, false)
+const toolbarHolder = atom({ plugin: 'stretch', key: 'busy' } as const, null)
+
+// The highlight colours the toolbar offers: deep colours, whose text turns light. A light highlight
+// would draw dark text on a light ground, as a selection does. No text colour is offered: links,
+// code and the words a click added already speak in colour.
+const SWATCHES = ['#264f78', '#1f3a5f', '#3b4261', '#4b3b6b', '#5c2a4a', '#5f2a2a', '#5c4a00', '#1e4d2b', '#1d4b4b'] as const
+
+/** The letters, in row order: home, top, bottom. */
+const LETTERS = 'asdfghjklqwertyuiopzxcvbnm'
+// As of Claude Code 2.1.301 a plugin has no chord of its own: a Button naming one of the engine's
+// keybinding actions is pressed by that action's chords while no engine handler of it is mounted.
+// These two actions scroll the diff panel's file list, bound in its Global context to alt+down and
+// ctrl+down, and alt+up and ctrl+up. Checked again in 2.1.312, which lists both actions.
+const CHORDS: Record<Action, string> = { open: 'app:diffFileListDown', close: 'app:diffFileListUp' }
+/** How many of the latest replies on screen holding a stretch take letters. */
+const LETTERED_REPLIES = 3
+/** How many of the latest replies drawn by Clients are kept, to find the ones that take letters. */
+const KEPT_LETTERED_REPLIES = 50
+
+/**
+ * A reply drawn by Clients: its text, whether any of its rows are on screen, and its paragraphs that
+ * hold a stretch, with each one's state member.
+ */
+type LetteredReply = { text: string; isOnScreen: boolean; paragraphs: { member: string; text: string }[] }
+// Module state, not an atom: as of Claude Code 2.1.301 a render hook cannot write plugin state.
+const letteredReplies = new Map<string, LetteredReply>()
+
+/** A reply's text with its whitespace gone, as the site may break and trim its lines. */
+const keyOf = (text: string) => text.replace(/\s+/g, '')
+
+/** Sets `key` in `map` as its newest entry, dropping the oldest past `size`. */
+function setNewest<V>(map: Map<string, V>, key: string, value: V, size: number): void {
+  map.delete(key)
+  map.set(key, value)
+  for (const old of map.keys()) {
+    if (map.size <= size) break
+    map.delete(old)
+  }
+}
+
+/**
+ * The command that opens a URL on this machine, the URL its last argument: `open` on macOS; on
+ * Windows `rundll32 url.dll,FileProtocolHandler`, which runs no shell, where `cmd /c start` would
+ * read an `&` or a `|` in the URL as its own (checked on Windows 11 with Claude Code 2.1.312: it
+ * opens the default browser and exits 0); elsewhere `xdg-open`, its output sent to /dev/null, since
+ * a browser it starts can keep those pipes, and `$.process.run` waits for them to close.
+ *
+ * Which machine this is comes from `process.platform` where the runtime exposes one, and otherwise
+ * from `uname -s`: Windows where none starts or where it answers `Windows_NT` (busybox) or names
+ * Git Bash, MSYS or Cygwin; macOS for `Darwin`; Linux for anything else.
+ *
+ * As of Claude Code 2.1.306 a ctrl- or alt-click on a hyperlink in a paragraph a Client draws reaches
+ * the Client, and as of 2.1.302 a Client has no call that opens a URL. So the hooks module opens it,
+ * as Claude Code 2.1.304 opens a link in a paragraph it draws itself.
+ */
+async function openerOf($: EngineInterface): Promise<readonly string[]> {
+  const platform = await platformOf($)
+  if (platform === 'darwin') return ['open']
+  if (platform === 'win32') return ['rundll32', 'url.dll,FileProtocolHandler']
+  return ['sh', '-c', 'xdg-open "$1" </dev/null >/dev/null 2>&1', 'sh']
+}
+
+/** The machine this runs on, in Node's own names: `win32`, `darwin` or `linux` for everything else. */
+async function platformOf($: EngineInterface): Promise<'win32' | 'darwin' | 'linux'> {
+  // The hooks module has no Node of its own, so `process` is read as a global that may be absent.
+  const exposed: unknown = Reflect.get(globalThis, 'process')
+  const known = typeof exposed === 'object' && exposed !== null ? Reflect.get(exposed, 'platform') : undefined
+  if (known === 'win32' || known === 'darwin') return known
+  if (typeof known === 'string') return 'linux'
+  const system = await $.process.run(['uname', '-s']).then(({ stdout }) => stdout.trim(), () => undefined)
+  if (system === 'Darwin') return 'darwin'
+  if (system === undefined || /^(Windows_NT|MINGW|MSYS|CYGWIN)/.test(system)) return 'win32'
+  return 'linux'
+}
+
+/** Opens `href` as the machine opens a URL, and says so in a toast when it could not. */
+async function follow($: EngineInterface, href: string): Promise<void> {
+  const isOpened = await $.process.run([...(await openerOf($)), href]).then(({ exitCode }) => exitCode === 0, () => false)
+  if (!isOpened) $.ui.toast(`stretch: could not open ${href}`)
+}
+
+/**
+ * Writes the style being tried into the plugin's settings, the ones that differ from `saved`, then
+ * drops the try unless a press since made it differ again. A refusal keeps the try and says what was
+ * and was not saved. As of Claude Code 2.1.312 the settings land in the person's user settings, keyed
+ * `<plugin>.<field>`, and each write reloads the plugin with them.
+ */
+function saveLook($: EngineInterface, saved: Look): Promise<void> {
+  return withClaim($, 'save', async () => {
+    // Read when pressed: a mark pressed after the toolbar was last drawn is part of what is saved.
+    const tried = storedLook(await read($, pickedLook))
+    if (tried === null) return
+    const fields: [string, string, string][] = [
+      ['marks', marksSetting(tried.marks), marksSetting(saved.marks)],
+      ['highlight', tried.highlight, saved.highlight],
+    ]
+    const written: string[] = []
+    for (const [field, value] of fields.filter(([, value, before]) => value !== before)) {
+      const result = await $.config.set({ key: `stretch.${field}`, value }).catch((error: unknown) => ({ deny: error instanceof Error ? error.message : String(error) }))
+      if (result.deny !== undefined) {
+        $.ui.toast(written.length === 0 ? `stretch: the style was not saved: ${result.deny}` : `stretch: ${written.join(' and ')} saved, ${field} not saved: ${result.deny}`)
+        return
+      }
+      written.push(field)
+    }
+    await update($, pickedLook, stored => (isSameLook(storedLook(stored) ?? saved, tried) ? null : stored))
+  })
+}
+
+/** Drops the try, unless a save or a close holds the claim: a reset drawn before it began does nothing then. */
+async function resetTry($: EngineInterface): Promise<void> {
+  if ((await read($, toolbarHolder)) === null) await update($, pickedLook, () => null)
+}
+
+/**
+ * Puts the toolbar away; a try not saved goes with it, and the reader is told so. It takes the same
+ * claim as a save, so a close and a save pressed together never both act on the try.
+ */
+function closeToolbar($: EngineInterface, saved: Look): Promise<void> {
+  return withClaim($, 'close', async () => {
+    const [stored] = await Promise.all([read($, pickedLook), update($, toolbarShown, () => false)])
+    await update($, pickedLook, () => null)
+    const tried = storedLook(stored)
+    if (tried !== null && !isSameLook(tried, saved)) $.ui.toast('stretch: the style you tried was not saved')
+  })
+}
+
+/**
+ * Runs a save or a close under the toolbar's one-at-a-time claim, taken before it reads the try and
+ * released after, so a second press, or one from a toolbar drawn before the first began, finds the
+ * claim held and does nothing.
+ */
+async function withClaim($: EngineInterface, holder: 'save' | 'close', run: () => Promise<void>): Promise<void> {
+  const taken = { isMine: false }
+  await update($, toolbarHolder, held => {
+    taken.isMine = held === null
+    return taken.isMine ? holder : held
+  })
+  if (!taken.isMine) return
+  try {
+    await run()
+  } finally {
+    await update($, toolbarHolder, () => null)
+  }
+}
 
 // The $.store key holding whether the reader turned stretch off; absent means on.
 const ENABLED = 'enabled'
@@ -38,26 +193,40 @@ const ENABLED = 'enabled'
 const SHORT_WORDS = 'shortWords'
 
 export const USAGE =
-  'Usage: /stretch on | off | open-all | close-all | words N. on and off decide whether replies use the markup, and last across sessions; ' +
+  'Usage: /stretch on | off | open-all | close-all | words N | style. on and off decide whether replies use the markup, and last across sessions; ' +
   'open-all and close-all open or close every stretch in the latest reply; words N sets how many words a short reply may take ' +
-  `(${MIN_SHORT_WORDS} to ${MAX_SHORT_WORDS}), words alone shows the count, and words default forgets the one set here.`
+  `(${MIN_SHORT_WORDS} to ${MAX_SHORT_WORDS}), words alone shows the count, and words default forgets the one set here; ` +
+  'style shows a toolbar above the prompt that restyles how closed stretches are marked.'
 
-export const FULLSCREEN_NOTE =
-  'stretch: these replies are drawn fully open because clicks need the fullscreen renderer. ' +
-  'Run /tui fullscreen, or start Claude Code with CLAUDE_CODE_NO_FLICKER=1 if it already says fullscreen is on.'
+// Claude Code 2.1.312 can start a session on the main screen even with fullscreen set, and the
+// variable overrides that.
+const FULLSCREEN_HOW = 'Run /tui fullscreen, or start Claude Code with CLAUDE_CODE_NO_FLICKER=1 if it already says fullscreen is on.'
 
-// Words a stretch adds take one of four theme colours, mixed toward the text colour; all but the
-// newest open stretch fade toward the background.
-const BASE = {
+export const FULLSCREEN_NOTE = `stretch: these replies are drawn fully open because clicks need the fullscreen renderer. ${FULLSCREEN_HOW}`
+
+// Words a stretch adds take one of four theme colours, mixed 45 percent toward the text colour so
+// they tint rather than shout. Each open stretch keeps its colour; all but the newest take a faded
+// form of it, mixed 35 percent toward the background. In the tinted highlight a closed stretch sits
+// on the same theme colour mixed 75 percent toward the background, deep on the dark theme and pale
+// on the light one; on both, the text contrastOn picks reads at 10:1 or more.
+const BASE: Record<'dark' | 'light', readonly [Rgb, Rgb, Rgb, Rgb]> = {
   dark: [[255, 193, 7], [175, 135, 255], [72, 150, 140], [215, 119, 87]],
   light: [[150, 108, 30], [135, 0, 255], [0, 102, 102], [215, 119, 87]],
 }
-const mix = (rgb: number[], toward: number, share: number) => rgb.map(v => Math.round(v + (toward - v) * share))
-const hex = (rgb: number[]) => `#${rgb.map(v => v.toString(16).padStart(2, '0')).join('')}`
-const paletteOf = (base: number[][], text: number, background: number) =>
-  base.map(rgb => mix(rgb, text, 0.45)).map(soft => ({ soft: hex(soft), faded: hex(mix(soft, background, 0.35)) }))
-const PALETTES = { dark: paletteOf(BASE.dark, 255, 0), light: paletteOf(BASE.light, 0, 255) }
+const WHITE: Rgb = [255, 255, 255]
+const BLACK: Rgb = [0, 0, 0]
+const paletteOf = (base: readonly Rgb[], text: Rgb, background: Rgb) =>
+  base.map(rgb => {
+    const soft = mix(rgb, text, 0.45)
+    return { soft: hex(soft), faded: hex(mix(soft, background, 0.35)), highlight: hex(mix(rgb, background, 0.75)) }
+  })
+const PALETTES = { dark: paletteOf(BASE.dark, WHITE, BLACK), light: paletteOf(BASE.light, BLACK, WHITE) }
+/** How many colours stretches take in turn. */
 const HUES = BASE.dark.length
+/** `count`, or the next count when `count` would give the colour of the stretch holding it, whose count is `parent`. */
+const hueAfter = (count: number, parent: number | undefined) => (parent !== undefined && count % HUES === parent % HUES ? count + 1 : count)
+/** The colours (a palette entry) a count or a place picks, taken in turn. */
+const colourAt = <Entry,>(palette: readonly Entry[], n: number): Entry | undefined => palette[n % HUES]
 
 // Links the plugin draws are answered by the plugin and never followed; a reserved name resolves nowhere.
 export const HREF = 'https://stretch.invalid/'
@@ -74,17 +243,83 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'stretch',
-      description: 'Turn stretch replies on or off, open or close every stretch in the latest reply, or set the short reply length',
-      argumentHint: '[on|off|open-all|close-all|words N]',
+      description: 'Turn stretch replies on or off, open or close every stretch in the latest reply, set the short reply length, or style closed stretches',
+      argumentHint: '[on|off|open-all|close-all|words N|style]',
     })
     return next(e)
   })
 
   // A /config value at the default reads as the default.
   const isConfigured = wordsOf(options?.shortWords) !== undefined && settings.shortWords !== DEFAULT_SHORT_WORDS
-  on('command.run', { command: 'stretch' }, async ($, e) => ({ text: await runCommand($, e.args.trim().toLowerCase(), settings, isConfigured) }))
+  on('command.run', { command: 'stretch' }, async ($, e) => ({ text: await runCommand($, e.args.trim().toLowerCase(), settings, isConfigured, e.presentation) }))
+
+  // The style toolbar, above the prompt while /stretch style has it open. Terminal only: as of
+  // Claude Code 2.1.312 the desktop app draws each Button natively, where a highlight swatch has no
+  // label. The band above the prompt has its own [-], which collapses it without the plugin
+  // knowing, so the command only shows the toolbar and close puts it away.
+  const baseLook = settings.look
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface !== 'terminal' || e.props.hasSurvey || !(await read($, toolbarShown))) return next(e)
+    const [stored, holder] = await Promise.all([read($, pickedLook), read($, toolbarHolder)])
+    const tried = storedLook(stored)
+    const look = tried ?? baseLook
+    // Only a try that differs from the saved style leaves anything to reset or save.
+    const isTrying = tried !== null && !isSameLook(tried, baseLook)
+    // Each press starts from the look as it is now, not as this draw saw it, so quick presses add up.
+    const change = (edit: (now: Look) => Partial<Look>) =>
+      update($, pickedLook, stored => {
+        const now = storedLook(stored) ?? baseLook
+        return { ...now, ...edit(now) }
+      })
+    const setHighlight = (highlight: Highlight) => () => change(() => ({ highlight }))
+    // One colour for every stretch: the one being tried, else the saved one, else the first swatch; the
+    // swatches then pick which.
+    const startColour = isColour(baseLook.highlight) ? baseLook.highlight : SWATCHES[0]
+    const pickColour = () => change(now => ({ highlight: isColour(now.highlight) ? now.highlight : startColour }))
+    const toggle = (mark: Mark) => change(now => ({ marks: now.marks.includes(mark) ? now.marks.filter(m => m !== mark) : [...now.marks, mark] }))
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const chosen = (isOn: boolean, label: string) => (isOn ? <Text bold>[{label}]</Text> : <Text>{label}</Text>)
+    // While a save or a close holds the claim nothing is pressable: a press then would race it.
+    const pressable = (key: string, onPress: () => unknown, label: RenderNode) =>
+      holder !== null ? <Text key={key}>{label}</Text> : <Button plain key={key} onPress={onPress}>{label}</Button>
+    const swatch = (c: Hex) =>
+      pressable(`highlight-${c}`, setHighlight(c), <Text backgroundColor={c} {...contrastOn(c)}>{look.highlight === c ? '◆◆' : '  '}</Text>)
+    const row = (label: string, parts: RenderNode[]) => (
+      <Box key={`row-${label}`} flexWrap="wrap" columnGap={1}>
+        <Text dimColor>{label.padEnd(9)}</Text>
+        {parts}
+      </Box>
+    )
+    return (
+      <Box flexDirection="column">
+        {row('marks', [
+          ...MARK_NAMES.map(mark => pressable(`mark-${mark}`, () => toggle(mark), chosen(look.marks.includes(mark), mark))),
+          // A close holds the claim only while the toolbar goes away, so it shows no word.
+          ...(holder !== null
+            ? holder === 'save' ? [<Text key="saving" dimColor>saving</Text>] : []
+            : [
+                ...(isTrying
+                  ? [
+                      <Button plain key="reset" onPress={() => resetTry($)}>reset</Button>,
+                      <Button plain key="save" onPress={() => saveLook($, baseLook)}>save</Button>,
+                    ]
+                  : []),
+                <Button plain key="close" onPress={() => closeToolbar($, baseLook)}>close</Button>,
+              ]),
+        ])}
+        {row('highlight', [
+          pressable('highlight-none', setHighlight(''), chosen(look.highlight === '', 'no highlight')),
+          pressable('highlight-colour', pickColour, chosen(isColour(look.highlight), 'colour')),
+          pressable('highlight-tinted', setHighlight(TINTED), chosen(look.highlight === TINTED, 'tinted')),
+          ...(isColour(look.highlight) ? SWATCHES.map(swatch) : []),
+        ])}
+      </Box>
+    )
+  })
 
   on('prompt.submit', async ($, e, next) => {
+    // Sending a prompt puts the letters away, whatever sent it.
+    await update($, lettering, () => null)
     // The /stretch command leaves the latest reply as it was, so open-all and close-all can act on it.
     if (e.command?.name === 'stretch') return next(e)
     // Every other prompt ends the reply the opens belonged to, whatever sent it.
@@ -195,28 +430,50 @@ export const register: Register = (on, options) => {
     if (canPress(e)) {
       // Fullscreen terminal: a paragraph holding a stretch is drawn by a Client that takes the
       // clicks; the rest is the engine's own markdown.
-      const { Box, Client, Markdown, Text } = $.ui.resolve(e)
-      const [{ order, count }, newest, bulk] = await Promise.all([
+      const { Box, Button, Client, Markdown, Text } = $.ui.resolve(e)
+      const [{ order, count }, newest, bulk, shown, picked] = await Promise.all([
         read($, memberOf(stretchOrder, { requestId: e.requestId })),
         read($, newestReply),
         read($, bulkAction),
+        read($, lettering),
+        read($, pickedLook),
       ])
       // An open-all or close-all reaches the Clients of the reply it was aimed at.
       const aimed: Bulk | undefined = bulk.requestIds.includes(e.requestId) ? { id: bulk.id, action: bulk.action } : undefined
+      const look = storedLook(picked) ?? baseLook
+      const isTinted = look.highlight === TINTED
+      // The theme matters only once a stretch in this reply is drawn in its colour: open, or with the tinted highlight.
       const isLight =
-        Object.keys(order).length > 0 &&
+        (isTinted || Object.keys(order).length > 0) &&
         (await $.config.list().catch(() => [])).some(row => row.key === 'theme' && String(row.value).startsWith('light'))
       const palette = isLight ? PALETTES.light : PALETTES.dark
+      const paragraphs = paragraphsOf(text).map((paragraph, i) => ({ ...paragraph, key: `paragraph-${i}`, member: `${e.requestId}#paragraph-${i}` }))
+      const holding = paragraphs.filter(p => p.hasStretch)
+      const places = isTinted ? placesOf(holding) : undefined
+      // The tinted highlight is each stretch's own, handed to the reply by key in place of the look's.
+      const drawnLook: DrawnLook = { ...look, highlight: isColour(look.highlight) ? look.highlight : '' }
+      // The terminal says again whether a reply is on screen whenever a scroll changes it; null is off it.
+      setNewest(letteredReplies, e.requestId, { text, isOnScreen: e.props.onScreen !== null, paragraphs: holding }, KEPT_LETTERED_REPLIES)
       const counted = await Promise.all(
-        paragraphsOf(text).map(async (paragraph, i) => {
+        paragraphs.map(async ({ hasStretch, text, key, member }) => {
           // A paragraph whose only stretches are labels is drawn with them open.
-          if (!paragraph.hasStretch) return { node: <Markdown text={paragraph.text.includes('{{') ? writeOpen(parse(paragraph.text)) : paragraph.text} />, opened: 0 }
-          const key = `paragraph-${i}`
-          const open = await read($, memberOf(openStretches, { requestId: `${e.requestId}#${key}` }))
-          const tints = tintsOf(order, key, newest === e.requestId ? count - 1 : -1, palette)
-          const props: ReplyProps = { text: paragraph.text, open, tints, ...(aimed !== undefined && { bulk: aimed }) }
+          if (!hasStretch) return { node: <Markdown text={text.includes('{{') ? writeOpen(parse(text)) : text} />, opened: 0 }
+          const [open, ask] = await Promise.all([read($, memberOf(openStretches, { requestId: member })), read($, memberOf(askedStretch, { requestId: member }))])
+          const placed = places?.get(key)
+          const tints = tintsOf(order, key, newest === e.requestId ? count - 1 : -1, palette, placed)
+          const keys = Object.fromEntries((shown?.targets ?? []).filter(one => one.member === member).map(one => [one.key, one.letter]))
+          const props: ReplyProps = {
+            text,
+            open,
+            tints,
+            ...(aimed !== undefined && { bulk: aimed }),
+            ask,
+            letters: shown === null ? null : { action: shown.action, keys },
+            look: drawnLook,
+            highlights: placed === undefined ? {} : highlightsOf(placed, palette),
+          }
           // The open list holds only keys of linkable stretches, nested ones among them.
-          const opened = stretches(parse(paragraph.text)).filter(stretch => isLinkable(stretch) && open.includes(stretch.key)).length
+          const opened = stretches(parse(text)).filter(stretch => isLinkable(stretch) && open.includes(stretch.key)).length
           return { node: <Client key={key} module="./reply.tsx" props={props} width="100%" />, opened }
         }),
       )
@@ -228,9 +485,17 @@ export const register: Register = (on, options) => {
       const footer = total >= 2 && (
         <Client key="all" module="./links.tsx" props={{ links: footerLinks(opened, total), note: `${opened === 0 ? 'none' : opened} of ${total} open` } satisfies LinksProps} />
       )
+      // On a reply's first row the bullet and the space after it are Buttons: the first puts up the
+      // letters that open, or puts them away when they show; the second does the same for those that
+      // close. A chord presses them, and so does a click.
       return (
         <Box flexDirection="row">
-          <Text>{marker}</Text>
+          {e.props.isFirstOfReply
+            ? [
+                <Button key="open-letters" plain label="⏺" action={CHORDS.open} onPress={() => void showLetters($, 'open')} />,
+                <Button key="close-letters" plain label=" " action={CHORDS.close} onPress={() => void showLetters($, 'close')} />,
+              ]
+            : <Text>{marker}</Text>}
           <Box flexDirection="column" flexShrink={1} gap={1}>
             {drawn}
             {footer}
@@ -255,14 +520,30 @@ export const register: Register = (on, options) => {
     )
   })
 
-  // A paragraph's Client posts its open stretches whenever they change, and the one just opened.
+  // A paragraph's Client posts text the reader selected, a hyperlink the reader ctrl- or alt-clicked,
+  // and its open stretches whenever they change, with the one just opened.
   on('ui.message', async ($, e, next) => {
     if (e.module.endsWith('links.tsx')) {
       const href = linksPostOf(e.data)?.href
       if (href !== undefined) await linkPressed($, href, e)
       return next(e)
     }
-    const post = e.module.endsWith('reply.tsx') ? replyPostOf(e.data) : undefined
+    if (!e.module.endsWith('reply.tsx')) return next(e)
+    // Text the reader dragged across in a paragraph, where as of Claude Code 2.1.302 the transcript
+    // selects nothing itself.
+    const copy = copyOf(e.data)
+    if (copy !== undefined) {
+      const copied = await $.ui.copy({ text: copy, surface: e.surface })
+      if (!copied.isCopied) $.ui.toast(`stretch: the selection was not copied: ${copied.reason}`)
+      return next(e)
+    }
+    // A hyperlink the reader ctrl- or alt-clicked, opened without holding the post's chain on another program.
+    const followed = followOf(e.data)
+    if (followed !== undefined) {
+      void follow($, followed)
+      return next(e)
+    }
+    const post = replyPostOf(e.data)
     if (post === undefined) return next(e)
     if (post.mounted === true) await noteDrawn($, e.requestId)
     await update($, memberOf(openStretches, { requestId: `${e.requestId}#${e.element}` }), () => post.open)
@@ -275,12 +556,85 @@ export const register: Register = (on, options) => {
       const kept = Object.fromEntries(Object.entries(order).filter(([at]) => !at.startsWith(here) || post.open.includes(at.slice(here.length))))
       if (opened === undefined) return { order: kept, count }
       const parent = kept[`${here}${parentOf(opened.key)}`]
-      const n = parent !== undefined && count % HUES === parent % HUES ? count + 1 : count
+      const n = hueAfter(count, parent)
       return { order: { ...kept, [`${here}${opened.key}`]: n }, count: n + 1 }
     })
     if (opened !== undefined) await update($, newestReply, () => e.requestId)
     return next(e)
   })
+
+  // While the letters show, the next edit at the prompt puts them away. A key that is one of the
+  // letters asks its stretch's paragraph to open or close it, in place as a click does, and is not
+  // typed; any other key, including a capital and a letter no stretch has, is typed as usual.
+  on('prompt.edit', async ($, e, next) => {
+    const shown = await read($, lettering)
+    if (shown === null) return next(e)
+    await update($, lettering, () => null)
+    const typed = e.key?.ctrl === undefined && e.key?.meta === undefined ? e.key?.key : undefined
+    const target = shown.targets.find(one => one.letter === typed)
+    if (target === undefined) return next(e)
+    await update($, memberOf(askedStretch, { requestId: target.member }), last => ({ key: target.key, action: shown.action, n: (last?.n ?? 0) + 1 }))
+
+    return { text: e.text, cursor: e.cursor }
+  })
+
+  // A change to the prompt box that is not an edit, such as a recalled history entry or a clear,
+  // puts the letters away too. Claude Code 2.1.312 raises prompt.change for those.
+  on('prompt.change', async ($, e, next) => {
+    if ((await read($, lettering)) !== null) await update($, lettering, () => null)
+    return next(e)
+  })
+}
+
+/**
+ * Puts up the letters for `action`, or puts them away when they already show for it or no stretch
+ * in the latest replies on screen takes one.
+ */
+async function showLetters($: EngineInterface, action: Action): Promise<void> {
+  const shown = await read($, lettering)
+  const targets = shown?.action === action ? [] : await lettersFor($, action)
+  await update($, lettering, () => (targets.length === 0 ? null : { action, targets }))
+}
+
+/**
+ * A letter for each of the first 26 stretches `action` can act on in the latest three replies on
+ * screen holding a stretch, newest first, in reading order within each. The order is read from the
+ * session's messages because Claude Code 2.1.301 draws a reply for the first time when it scrolls
+ * into view.
+ */
+async function lettersFor($: EngineInterface, action: Action): Promise<{ letter: string; member: string; key: string }[]> {
+  // With their whitespace gone, no reply is found across two messages joined by a line break.
+  const written = (await $.session.messages().catch(() => []))
+    .filter(message => message.role === 'assistant' && message.text.includes('{{'))
+    .map(message => keyOf(stripMarkers(normalize(message.text))))
+    .join('\n')
+  const replies = [...letteredReplies.values()]
+    .filter(reply => reply.isOnScreen)
+    .map(reply => ({ reply, at: written.lastIndexOf(keyOf(reply.text)) }))
+    .filter(({ at }) => at !== -1)
+    .sort((a, b) => b.at - a.at)
+    .slice(0, LETTERED_REPLIES)
+  const paragraphs = replies.flatMap(({ reply }) => reply.paragraphs)
+  const targets = await Promise.all(
+    paragraphs.map(async ({ member, text }) => {
+      const open = await read($, memberOf(openStretches, { requestId: member }))
+      return targetsIn(parse(text), open, action).map(stretch => ({ member, key: stretch.key }))
+    }),
+  )
+
+  return targets.flat().slice(0, LETTERS.length).map((target, i) => ({ ...target, letter: LETTERS.charAt(i) }))
+}
+
+/** A Client's post of a web link to open, if it is one. */
+function followOf(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null || !('follow' in data)) return undefined
+  return typeof data.follow === 'string' && isWebLink(data.follow) ? data.follow : undefined
+}
+
+/** A Client's post of text to copy, if it is one. */
+function copyOf(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null || !('copy' in data)) return undefined
+  return typeof data.copy === 'string' && data.copy !== '' ? data.copy : undefined
 }
 
 /**
@@ -358,15 +712,67 @@ function linksPostOf(data: unknown): LinksPost | undefined {
   return { href: data.href }
 }
 
-function tintsOf(order: Record<string, number>, paragraph: string, newest: number, palette: { soft: string; faded: string }[]): Record<string, Tint> {
+/**
+ * The tint of each open stretch in one paragraph: its colour by the count it was opened at, or under
+ * the tinted highlight by its place, faded unless it was opened at `newest`.
+ */
+function tintsOf(
+  order: Record<string, number>,
+  paragraph: string,
+  newest: number,
+  palette: { soft: string; faded: string }[],
+  places?: ReadonlyMap<string, number>,
+): Record<string, Tint> {
   const here = `${paragraph}#`
   return Object.fromEntries(
     Object.entries(order)
       .filter(([at]) => at.startsWith(here))
       .flatMap(([at, n]) => {
-        const colours = palette[n % palette.length]
-        return colours === undefined ? [] : [[at.slice(here.length), { words: n === newest ? colours.soft : colours.faded, closer: colours.soft }]]
+        const key = at.slice(here.length)
+        // Under the tinted highlight a stretch with no place has no colour to keep, so none is made up.
+        const place = places === undefined ? n : places.get(key)
+        const colours = place === undefined ? undefined : colourAt(palette, place)
+        return colours === undefined ? [] : [[key, { words: n === newest ? colours.soft : colours.faded, closer: colours.soft }]]
       }),
+  )
+}
+
+/**
+ * Each pressable stretch's place in a reply, by paragraph then key, which picks its colour under the
+ * tinted highlight: counted in reading order across the reply's paragraphs, a nested stretch after the
+ * one holding it and never in that one's colour, so a stretch has its colour before it is opened.
+ */
+function placesOf(paragraphs: { text: string; key: string }[]): Map<string, Map<string, number>> {
+  let next = 0
+  return new Map(
+    paragraphs.map(({ text, key }) => {
+      const places = new Map<string, number>()
+      // The holding stretch is passed down the parse, not read back from a key, which a short form can spell like a nested one.
+      const walk = (segments: Segment[], holder: number | undefined) => {
+        for (const segment of segments) {
+          if (typeof segment === 'string') continue
+          let inside = holder
+          if (isLinkable(segment)) {
+            inside = hueAfter(next, holder)
+            places.set(segment.key, inside)
+            next = inside + 1
+          }
+          walk(segment.long ?? [], inside)
+        }
+      }
+      walk(parse(text), undefined)
+      return [key, places]
+    }),
+  )
+}
+
+/** Under the tinted highlight, each stretch's highlight in one paragraph, by key: its colour's deep form. */
+function highlightsOf(places: ReadonlyMap<string, number>, palette: readonly { highlight: Hex }[]): Record<string, Hex> {
+  return Object.fromEntries(
+    [...places].flatMap(([key, place]) => {
+      const colours = colourAt(palette, place)
+      return colours === undefined ? [] : [[key, colours.highlight]]
+    }),
   )
 }
 
@@ -467,10 +873,22 @@ async function runWords($: EngineInterface, rest: string, settings: Settings, is
   return `stretch: a short reply is now ${words} words at most. Your next message brings Claude the guide with the new count.`
 }
 
+/**
+ * Runs `/stretch style`: shows the toolbar above the prompt, in the fullscreen terminal, where a
+ * closed stretch is drawn by the plugin. Running it again leaves the toolbar shown.
+ */
+async function runStyle($: EngineInterface, presentation: { isFullscreen: boolean }): Promise<string> {
+  if (!(await $.session.surfaces()).includes('terminal')) return 'stretch: the style toolbar is drawn in the terminal, above the prompt; with no terminal attached there is none.'
+  if (!presentation.isFullscreen) return `stretch: the style toolbar is drawn in fullscreen; on the main screen every stretch is drawn open. To use it, ${FULLSCREEN_HOW}`
+  await update($, toolbarShown, () => true)
+  return 'stretch: style toolbar shown above the prompt; close puts it away.'
+}
+
 /** Runs `/stretch <args>` and answers the line it prints. */
-async function runCommand($: EngineInterface, args: string, settings: Settings, isConfigured: boolean): Promise<string> {
+async function runCommand($: EngineInterface, args: string, settings: Settings, isConfigured: boolean, presentation: { isFullscreen: boolean }): Promise<string> {
   const [word = '', ...rest] = args.split(/\s+/)
   if (word === 'words') return runWords($, rest.join(' '), settings, isConfigured)
+  if (word === 'style') return runStyle($, presentation)
   if (word === 'on' || word === 'off') {
     await $.store.set(ENABLED, word === 'on')
     return word === 'on'
@@ -492,14 +910,17 @@ async function runCommand($: EngineInterface, args: string, settings: Settings, 
 
 /**
  * What the next prompt carries for the model about the markup: the guide where the conversation
- * the next request is built from holds none (a new session, a /clear, a compaction) or holds the
- * off note or another word count after it; the off note where stretch is off and a guide stands
- * last. Undefined when nothing needs saying, or when the conversation cannot be read.
+ * the next request is built from holds none of the current version (a new session, a /clear, a
+ * compaction, an older guide) or holds the off note or another word count after it; the off note
+ * where stretch is off and a guide of any version stands last, since an older guide still has the
+ * model writing the markup. Undefined when nothing needs saying, or when the conversation cannot
+ * be read.
  */
 export async function guideNote($: EngineInterface, isOn: boolean, shortWords: number): Promise<string | undefined> {
   const messages: unknown = await $.session.messages({ as: 'api' }).catch(() => undefined)
   if (!Array.isArray(messages)) return undefined
   let last: Sent | undefined
+  let lastOfAnyVersion: Sent | undefined
   for (const message of messages as unknown[]) {
     if (typeof message !== 'object' || message === null || !('role' in message) || !('content' in message)) return undefined
     if (!Array.isArray(message.content)) return undefined
@@ -507,11 +928,12 @@ export async function guideNote($: EngineInterface, isOn: boolean, shortWords: n
     for (const block of message.content as unknown[]) {
       const text = typeof block === 'object' && block !== null && 'text' in block && typeof block.text === 'string' ? block.text : ''
       last = lastSentIn(text) ?? last
+      lastOfAnyVersion = lastSentIn(text, true) ?? lastOfAnyVersion
     }
   }
   if (isOn) return last?.kind === 'guide' && last.words === shortWords ? undefined : guide(shortWords)
 
-  return last?.kind === 'guide' ? OFF_NOTE : undefined
+  return lastOfAnyVersion?.kind === 'guide' ? OFF_NOTE : undefined
 }
 
 /** The text of the model's last reply: its rows after the person's last prompt. */

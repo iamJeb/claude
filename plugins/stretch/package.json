@@ -1,0 +1,20 @@
+{
+  "name": "stretch-dev",
+  "private": true,
+  "type": "module",
+  "description": "Tools around the plugin: its tests and the benchmark. The plugin itself needs none of this.",
+  "scripts": {
+    "test": "claude plugin validate . && claude plugin test .",
+    "typecheck": "tsc -p bench/tsconfig.json",
+    "bench:native": "node --import ./bench/register.mjs bench/native.ts",
+    "bench:replay": "node --import ./bench/register.mjs bench/replay.ts",
+    "bench:coverage": "node --import ./bench/register.mjs bench/coverage.ts",
+    "bench:report": "node --import ./bench/register.mjs bench/report.ts",
+    "bench:ab": "node --import ./bench/register.mjs bench/ab.ts",
+    "bench:check": "node --import ./bench/register.mjs bench/stub/check.ts"
+  },
+  "devDependencies": {
+    "@types/node": "24.6.0",
+    "typescript": "5.9.3"
+  }
+}

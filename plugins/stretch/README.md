@@ -20,9 +20,14 @@ Needs Claude Code 2.1.275 or later and a fullscreen terminal or the desktop app.
 - An open all and close all line under any reply with several stretches, with a count of how many are open.
 - Claude is told which stretches you opened, and repeats what you skipped when it matters.
 - Finished tool calls fold to one line, with show, show all, fold and fold all beside them.
+- Text in a paragraph that holds a stretch can be selected and copied: drag across it, or double-click a word. A ctrl- or alt-click on a web link opens it.
+- Stretches open from the keyboard: ctrl+↓ or alt+↓ puts a letter over each closed one, and typing the letter opens it.
+- `/stretch style` shows a toolbar that restyles how closed stretches are marked, with bold, italic, underline, strikethrough, dim and a highlight.
 - `/stretch off` and `/stretch on`, `/stretch open-all` and `/stretch close-all`, `/stretch words N`.
+- Chinese, Japanese, Korean and Thai wrap and grow the way their scripts read.
 - Nothing that leaves the chat carries the markup: the plugin refuses a tool call that holds a stretch.
-- Two `/config` settings: the short reply length and whether tool groups fold.
+- Four `/config` settings: the short reply length, whether tool groups fold, and the marks and highlight on closed stretches.
+- A benchmark under `bench/` measures what the guide buys a reader and checks any change to it before it ships.
 
 ## How it works
 
@@ -35,6 +40,12 @@ In the fullscreen terminal, reply text with two or more stretches between one to
 Finished groups of tool calls fold to one line, with show and show all beside it to unfold that group or every finished group; fold and fold all put them back. Anything still running, or anything that failed, stays open.
 
 A stretch Claude uses as a label, alone on its own line and not written as a sentence, such as a heading word, a question or a phrase ending in a colon, is drawn open from the start.
+
+In the fullscreen terminal the plugin draws each paragraph that holds a stretch itself, so the terminal's own selection does not reach it. Instead, a drag across such a paragraph draws the text it crosses inverse and copies it when the button comes up, and stays within that paragraph. A double-click selects and copies the word under it; a path, a flag or a URL comes out whole, and a full stop after the word stays out. A phrase you can open acts when the button comes up, so a drag that starts on one selects rather than opening. A ctrl- or alt-click on an `http:` or `https:` link opens it in your browser; a `file:` link is left to the terminal.
+
+Stretches also open from the keyboard. ctrl+↓ or alt+↓ puts a letter over each closed stretch in the latest three replies on screen, up to 26, and typing that letter opens it. ctrl+↑ or alt+↑ puts letters over each «, to close. Any other key puts the letters away and is typed as usual, as does sending a prompt or pressing the same chord again. Claude Code binds these chords to scrolling the diff panel's file list, so while that panel is open with a long list they scroll it instead.
+
+Chinese and Japanese wrap between characters and grow a character at a time when a stretch opens, with punctuation never starting a row. Korean wraps at spaces. Thai, Lao, Khmer and Myanmar wrap between words, and their vowel and tone marks take no cell of their own.
 
 Wherever clicking is not possible, every stretch is drawn open and you see the whole reply.
 
@@ -60,11 +71,17 @@ In the fullscreen terminal, `/stretch open-all` opens every stretch in the lates
 
 `/stretch words 80` makes 80 the most words a reply should take with every stretch closed, from 10 to 2000, and keeps it across sessions ahead of the `/config` setting. `/stretch words` shows the count in force and where it comes from, and `/stretch words default` goes back to the setting. The change reaches Claude with your next message.
 
+In the fullscreen terminal, `/stretch style` puts a toolbar above the prompt that restyles every reply as you click. The marks are bold, italic, underline, strikethrough and dim. The highlight is one of nine deep colours, or tinted, which puts each closed stretch on the colour its words take once you open it, blended into the background, with the text turned near black or near white so it reads. Under a highlight, dim moves the text toward the highlight. Save keeps the style in the two settings below; close puts the toolbar away and drops a style you tried but did not save. With nothing set, phrases stay underlined.
+
 `/stretch` on its own shows whether stretch is on, the word count, and how to use the command.
 
 ## Settings
 
-Two settings show up in `/config`. Short reply length (`shortWords`, 150 by default) is the most words a reply should take with every stretch closed; a value below 10 or above 2000 falls back to 150, and a count set with `/stretch words` takes precedence. Fold finished tool groups (`foldTools`, on by default) can be turned off if you would rather see every tool call as Claude Code draws it.
+Four settings show up in `/config`. Short reply length (`shortWords`, 150 by default) is the most words a reply should take with every stretch closed; a value below 10 or above 2000 falls back to 150, and a count set with `/stretch words` takes precedence. Fold finished tool groups (`foldTools`, on by default) can be turned off if you would rather see every tool call as Claude Code draws it. Closed stretch marks (`marks`) is a list from bold, italic, underline, strikethrough and dim; empty keeps the underline, and none takes every mark away. Closed stretch highlight (`highlight`) is a hex colour such as `#264f78`, or the word tinted; empty is none. The toolbar writes the last two for you.
+
+## Benchmark
+
+`bench/` measures what the guide buys a reader, on your own transcripts, and checks a guide change before it ships: a skim is a reply with every stretch closed, the full text is every stretch open, and the read text is the skim plus what you opened. Layout rules check the guide's own sentences against each answer, and a model judge grades two guide variants on the same tasks without knowing which wrote what. Nothing in it is needed to run the plugin. [bench/README.md](bench/README.md) says how to run each part.
 
 ## Install
 
@@ -102,6 +119,8 @@ claude plugin update stretch@iamjeb-claude
 ```
 
 ## Changes
+
+0.4.0 on 2026-10-29. Text in a paragraph that holds a stretch can be selected and copied by drag or double-click, a code block in such a paragraph included, and a ctrl- or alt-click opens a web link. Stretches open from the keyboard with ctrl+↓ or alt+↓ and close with ctrl+↑ or alt+↑. `/stretch style` restyles closed stretches with marks and a highlight, kept in two new settings. Chinese, Japanese, Korean and Thai wrap and grow by their own rules. A long form that ends in a code block closed on the same line as the stretch no longer swallows the rest of the reply. The guide asks for list items as stretches of their own, so a list stays in view. A benchmark under `bench/` measures the guide on real transcripts and checks a change to it.
 
 0.3.1 on 2026-10-19. The open all, close all, show all and fold all rows are drawn by the plugin itself, so the address behind each click no longer shows beside its words. A drag that starts on one of them no longer counts as a click.
 

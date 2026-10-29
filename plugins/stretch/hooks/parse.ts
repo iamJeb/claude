@@ -1,6 +1,3 @@
-// Adapted from cc-stretch (https://github.com/pro-vi/cc-stretch), MIT License, Copyright (c) 2026 pro-vi.
-// See ../LICENSE-cc-stretch.
-
 // A reply is markdown in which `{{short|long}}` marks a stretch: the reader sees `short`, and
 // opening it puts `long` in its place. `long` may hold further stretches. Code spans and fences are
 // copied as written, so braces in code never open a stretch.
@@ -95,21 +92,25 @@ function opensAt(text: string, i: number): boolean {
 
 /**
  * Whether a long form, as written, reads as template syntax rather than prose: a single token with
- * no space (`upper`, `currency`), or one with `=` before its first space (`url=...`).
+ * no space (`upper`, `currency`), or one with `=` before its first space (`url=...`). A long form
+ * written in a script that puts no space between words (Chinese, Japanese, Thai, Lao, Khmer,
+ * Myanmar, the classes layout.ts lays out as unspaced or segmented) is prose however few spaces it
+ * holds, so one such character anywhere in it makes it a stretch.
  */
 function isTemplateLong(raw: string): boolean {
   const space = raw.search(/\s/)
-  if (space === -1) return true
+  if (space === -1) return !/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Bopomofo}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u.test(raw)
 
   return raw.slice(0, space).includes('=')
 }
 
-type Parsed = { root: Segment[]; rejected: [number, number][]; spans: [number, number][] }
+type Parsed = { root: Segment[]; rejected: [number, number][]; spans: [number, number][]; fenceBraces: Set<number> }
 
 /**
  * One pass. `literal` maps the start of each `{{` to be read as text to the position of the `}}`
  * closing it (-1 for none), which is read as text too. Returns the stretches found unclosed or
- * template-like, as [start, close], to be made literal on the next pass.
+ * template-like, as [start, close], to be made literal on the next pass, and the positions of the
+ * braces at which a code fence closed.
  */
 function parseOnce(text: string, literal: ReadonlyMap<number, number>): Parsed {
   const literalCloses = new Set([...literal.values()].filter(at => at >= 0))
@@ -117,6 +118,7 @@ function parseOnce(text: string, literal: ReadonlyMap<number, number>): Parsed {
   const stack: Frame[] = []
   const spans: [number, number][] = []
   const rejected: [number, number][] = []
+  const fenceBraces = new Set<number>()
 
   const containerOf = (frame: Frame | undefined) => frame?.stretch.long ?? root
   const write = (chunk: string) => {
@@ -133,31 +135,62 @@ function parseOnce(text: string, literal: ReadonlyMap<number, number>): Parsed {
   }
   const put = (segment: Segment) => (typeof segment === 'string' ? write(segment) : containerOf(stack.at(-1)).push(segment))
 
+  // When a fence closes at the braces of the stretch around it, the rest of that line is ordinary
+  // reply text: further braces close outer stretches, and anything else is written after them. Once
+  // a stretch has closed there, what else the line carries goes on a line of its own, so the fence
+  // still closes in the opened reply, which is the mirror of how closeAfter writes a closer.
+  let isOnFenceLine = false
+  let needsBreak = false
+  const leaveFenceLine = () => {
+    isOnFenceLine = false
+    needsBreak = false
+  }
+  const breakLine = () => {
+    if (needsBreak) write('\n')
+    leaveFenceLine()
+  }
+  // Text that is not the close of a stretch: it leaves the fence line when it is not whitespace,
+  // or when it carries the line's end.
+  const writeText = (chunk: string) => {
+    if (chunk.trim() !== '') breakLine()
+    else if (chunk.includes('\n')) leaveFenceLine()
+    write(chunk)
+  }
+
   let i = 0
   while (i < text.length) {
     const frame = stack.at(-1)
     const isInShort = frame !== undefined && frame.stretch.long === undefined
+    const isInLong = frame !== undefined && !isInShort
 
-    const fenceStop = i === 0 || text[i - 1] === '\n' ? fenceEnd(text, i) : undefined
-    if (fenceStop !== undefined) {
-      write(text.slice(i, fenceStop))
-      i = fenceStop
+    // The braces after a closing fence close the fence inside a long form, and also where an
+    // earlier pass read them as the close of a stretch it then rejected, so the block ends where it
+    // did on that pass instead of running to the end of the reply.
+    const fence = i === 0 || text[i - 1] === '\n' ? fenceEnd(text, i, at => isInLong || literalCloses.has(at)) : undefined
+    if (fence !== undefined) {
+      writeText(text.slice(i, fence.end))
+      if (fence.isAtBraces) {
+        fenceBraces.add(fence.end)
+        isOnFenceLine = true
+      }
+      i = fence.end
       continue
     }
 
     if (text[i] === '`') {
       const stop = codeSpanEnd(text, i)
-      write(text.slice(i, stop))
+      writeText(text.slice(i, stop))
       i = stop
       continue
     }
 
     if (text.startsWith('{{', i) && (!isInShort || (!literal.has(i) && opensAt(text, i)))) {
       if (literal.has(i) || !opensAt(text, i)) {
-        write('{{')
+        writeText('{{')
         i += 2
         continue
       }
+      breakLine()
       // A short form holds no stretch: a stretch opening inside one means the outer `{{` was text.
       if (isInShort) {
         stack.pop()
@@ -179,7 +212,7 @@ function parseOnce(text: string, literal: ReadonlyMap<number, number>): Parsed {
     }
 
     if (text.startsWith('}}', i) && literalCloses.has(i)) {
-      write('}}')
+      writeText('}}')
       i += 2
       continue
     }
@@ -198,21 +231,22 @@ function parseOnce(text: string, literal: ReadonlyMap<number, number>): Parsed {
         frame.stretch.isClosed = true
         containerOf(stack.at(-1)).push(frame.stretch)
         spans.push([frame.start, i + 2])
+        if (isOnFenceLine) needsBreak = true
       }
       i += 2
       continue
     }
 
-    write(text[i] ?? '')
+    writeText(text[i] ?? '')
     i += 1
   }
   for (const open of stack) rejected.push([open.start, -1])
 
-  return { root, rejected, spans }
+  return { root, rejected, spans, fenceBraces }
 }
 
 /** Parses until nothing is rejected; each rejected `{{` and its `}}` are made literal and the text read again. */
-function parseFull(input: string): { root: Segment[]; spans: [number, number][] } {
+function parseFull(input: string): { root: Segment[]; spans: [number, number][]; fenceBraces: Set<number> } {
   const text = normalize(input)
   const literal = new Map<number, number>()
   for (;;) {
@@ -300,21 +334,56 @@ function assignKeys(segments: Segment[], parent: string | undefined): void {
   }
 }
 
-/** Where a fenced code block opening at `start` ends (past its closing line), or undefined when no fence opens there. */
-function fenceEnd(text: string, start: number): number | undefined {
+/**
+ * Where a fenced code block opening at `start` ends: past its closing line, or at the braces that
+ * follow its closing fence when `closesAt` says braces at that position close the block, so they
+ * close the stretches around it; `isAtBraces` tells the two apart. A block never closed runs to the
+ * end of the text. Undefined when no fence opens there.
+ */
+function fenceEnd(text: string, start: number, closesAt: (at: number) => boolean): { end: number; isAtBraces: boolean } | undefined {
   const lineEnd = (from: number) => {
     const end = text.indexOf('\n', from)
     return end === -1 ? text.length : end
   }
-  const opening = /^[ \t]*(`{3,}|~{3,})/.exec(text.slice(start, lineEnd(start)))?.[1]
+  const opening = openingFence(text.slice(start, lineEnd(start)))
   if (opening === undefined) return undefined
 
   for (let at = lineEnd(start) + 1; at < text.length; at = lineEnd(at) + 1) {
-    const line = text.slice(at, lineEnd(at)).trim()
-    if (line.length >= opening.length && [...line].every(c => c === opening[0])) return Math.min(lineEnd(at) + 1, text.length)
+    const line = text.slice(at, lineEnd(at))
+    const close = fenceCloseOn(line, opening)
+    if (close === line.length) return { end: Math.min(lineEnd(at) + 1, text.length), isAtBraces: false }
+    if (close !== undefined && closesAt(at + close)) return { end: at + close, isAtBraces: true }
   }
 
-  return text.length
+  return { end: text.length, isAtBraces: false }
+}
+
+/** The marker `line` opens a code fence with, such as ``` or ~~~, or undefined when it opens none. */
+export function openingFence(line: string): string | undefined {
+  return /^[ \t]*(`{3,}|~{3,})/.exec(line)?.[1]
+}
+
+/**
+ * Whether `line` closes the code fence `fence` opened: trimmed, it is nothing but the fence's
+ * character, repeated at least as many times as the opening. A line such as ```python inside a
+ * block starts with the marker but carries other text, so it does not close the block.
+ */
+export function closesFence(line: string, fence: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.startsWith(fence) && trimmed === fence.charAt(0).repeat(trimmed.length)
+}
+
+/**
+ * Where the code fence `fence` opened may close on `line`: at the line's end when the line is only
+ * the fence, or where the braces begin when the line is the closing fence followed by `}}`, with
+ * spaces between allowed and anything at all after, which the caller decides on by where the line
+ * stands. Undefined when the line closes the fence in neither way.
+ */
+function fenceCloseOn(line: string, fence: string): number | undefined {
+  if (closesFence(line, fence)) return line.length
+  const braces = line.indexOf('}}')
+  if (braces === -1 || !closesFence(line.slice(0, braces), fence)) return undefined
+  return braces
 }
 
 /** Every stretch, outermost first, in the order the reply writes them. */
@@ -372,11 +441,13 @@ export type Paragraph = { text: string; hasStretch: boolean }
 /**
  * The reply cut at the blank lines that stand outside every stretch and code fence, so a paragraph
  * holding a stretch can be drawn apart from the rest. Neighbouring paragraphs without one are kept
- * together.
+ * together. A fence is tracked as the parser tracks it: a line that is only the fence closes it, and
+ * so does a closing fence followed by braces at a position where the parser closed one, which is
+ * inside a long form and never inside a short form.
  */
 export function paragraphsOf(input: string): Paragraph[] {
   const text = normalize(input)
-  const { spans } = parseFull(text)
+  const { spans, fenceBraces } = parseFull(text)
   const isInsideStretch = (at: number) => spans.some(([start, end]) => at > start && at < end)
   const pieces: string[] = []
   let current: string[] = []
@@ -385,12 +456,13 @@ export function paragraphsOf(input: string): Paragraph[] {
   for (const line of text.split('\n')) {
     const lineStart = offset
     offset += line.length + 1
-    const marker = /^[ \t]*(`{3,}|~{3,})/.exec(line)?.[1]
     if (fence !== undefined) {
-      if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length) fence = undefined
+      const close = fenceCloseOn(line, fence)
+      if (close === line.length || (close !== undefined && fenceBraces.has(lineStart + close))) fence = undefined
       current.push(line)
       continue
     }
+    const marker = openingFence(line)
     if (marker !== undefined) {
       fence = marker
       current.push(line)

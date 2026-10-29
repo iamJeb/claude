@@ -249,13 +249,14 @@ describe('/stretch open-all and close-all', () => {
 
 describe('settings', () => {
   test('missing or invalid values fall back to the defaults', () => {
-    expect(settingsOf(undefined)).toEqual({ shortWords: 150, foldTools: true })
-    expect(settingsOf({})).toEqual({ shortWords: 150, foldTools: true })
+    const look = { marks: ['underline'], highlight: '' }
+    expect(settingsOf(undefined)).toEqual({ shortWords: 150, foldTools: true, look })
+    expect(settingsOf({})).toEqual({ shortWords: 150, foldTools: true, look })
     for (const shortWords of [-5, 0, 3, 1e9, Number.NaN, 'many', '', true]) {
       expect(settingsOf({ shortWords }).shortWords).toBe(150)
     }
     expect(settingsOf({ foldTools: 'no' }).foldTools).toBe(true)
-    expect(settingsOf({ shortWords: 80, foldTools: false })).toEqual({ shortWords: 80, foldTools: false })
+    expect(settingsOf({ shortWords: 80, foldTools: false })).toEqual({ shortWords: 80, foldTools: false, look })
     expect(settingsOf({ shortWords: '200' }).shortWords).toBe(200)
   })
 

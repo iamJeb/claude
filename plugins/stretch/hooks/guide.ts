@@ -1,22 +1,29 @@
 // What the plugin sends the model about the markup, and the settings that shape it.
 
+import { lookOf } from './look'
+import type { Look } from './look'
+
 export const GUIDE_TITLE = '# Expandable phrases in chat replies'
 const OFF_TITLE = '# Expandable phrases are off'
 
 // The first line of the guide and of the off note, written by the plugin alone, by which a copy
 // already in the conversation is found. A title quoted in a prompt or in a compaction's summary
 // is not a copy.
-const sentinel = (kind: 'guide' | 'off', words?: number) => `<!-- stretch-${kind} v2${words === undefined ? '' : ` n=${words}`} -->`
+const sentinel = (kind: 'guide' | 'off', words?: number) => `<!-- stretch-${kind} v3${words === undefined ? '' : ` n=${words}`} -->`
 // Found at the start of a line, plain or as the engine labels a hook's context.
-const SENTINEL = /(?:^|\n)(?:prompt\.submit hook additional context: )?<!-- stretch-(guide|off) v2(?: n=(\d+))? -->/g
+const SENTINEL = /(?:^|\n)(?:prompt\.submit hook additional context: )?<!-- stretch-(guide|off) v3(?: n=(\d+))? -->/g
+// The same for any version the plugin has ever written, which the bench reads in old transcripts.
+// The plugin itself matches only the current version, so a session that holds an older guide is
+// sent the current one once.
+const SENTINEL_ANY = /(?:^|\n)(?:prompt\.submit hook additional context: )?<!-- stretch-(guide|off) v\d+(?: n=(\d+))? -->/g
 
 /** What the plugin last sent about the markup, in `text`: the guide and its word count, or the off note. */
 export type Sent = { kind: 'guide'; words: number } | { kind: 'off' }
 
-/** The last guide or off note the plugin wrote in `text`, found by its sentinel; undefined for none. */
-export function lastSentIn(text: string): Sent | undefined {
+/** The last guide or off note the plugin wrote in `text`, found by its sentinel, of the current version unless `anyVersion`; undefined for none. */
+export function lastSentIn(text: string, anyVersion = false): Sent | undefined {
   let last: Sent | undefined
-  for (const match of text.matchAll(SENTINEL)) {
+  for (const match of text.matchAll(anyVersion ? SENTINEL_ANY : SENTINEL)) {
     last = match[1] === 'off' ? { kind: 'off' } : { kind: 'guide', words: Number(match[2]) }
   }
 
@@ -27,8 +34,11 @@ export const DEFAULT_SHORT_WORDS = 150
 export const MIN_SHORT_WORDS = 10
 export const MAX_SHORT_WORDS = 2000
 
-/** The plugin's /config settings, each at its default where missing or invalid. */
-export type Settings = { shortWords: number; foldTools: boolean }
+/**
+ * The plugin's /config settings, each at its default where missing or invalid. `look` is how a closed
+ * stretch is marked, from the marks and highlight settings; the toolbar writes those two.
+ */
+export type Settings = { shortWords: number; foldTools: boolean; look: Look }
 
 /** `value` as a short reply length: a number, or digits in a string, from 10 to 2000; undefined for anything else. */
 export function wordsOf(value: unknown): number | undefined {
@@ -41,7 +51,7 @@ export function settingsOf(options: Readonly<Record<string, unknown>> | undefine
   const shortWords = wordsOf(options?.shortWords) ?? DEFAULT_SHORT_WORDS
   const foldTools = typeof options?.foldTools === 'boolean' ? options.foldTools : true
 
-  return { shortWords, foldTools }
+  return { shortWords, foldTools, look: lookOf(options) }
 }
 
 /** The guide, sent with the first prompt of a conversation and again after a compaction or a /clear. */
@@ -51,7 +61,7 @@ ${GUIDE_TITLE}
 
 You can mark a phrase as \`{{short|long}}\`. On screen the reader sees only "short", underlined. If they click it, "long" replaces it in the sentence, and a close marker after it puts "short" back. Markup can sit inside a long form to go one level deeper.
 
-Write so that the reply, with every phrase unclicked, answers the question by itself in ${shortWords} words or fewer. Keep anything the reader must act on or decide in the unclicked text.
+Write so that the reply, with every phrase unclicked, answers the question by itself in ${shortWords} words or fewer. Keep anything the reader must act on or decide in the unclicked text. Stretch list items, not whole lists.
 
 A stretch is where the depth goes, so each one has to hide something worth a click: the reasoning behind a claim, the evidence or numbers that settle it, file paths, the cost or risk, a caveat, an example, or the alternative you ruled out. Ask what the reader would want to know next about that phrase and put the answer in "long". A long form usually runs from one to several sentences. If it would add only a few words, write them into the sentence or leave them out, because a click that reveals an aside wastes the reader's time. Instructions elsewhere to stay terse or to skip unrequested justification govern the unclicked text, not the long forms.
 

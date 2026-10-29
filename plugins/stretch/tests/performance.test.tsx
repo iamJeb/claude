@@ -46,7 +46,10 @@ const measure = async ($: Engine, text: string, short: string, requestId: string
     const y = rows.findIndex(row => row.includes(short))
     const row = rows[y] ?? ''
     const t1 = Date.now()
-    await ui.pointer({ type: 'down', x: widthOf(row.slice(0, row.indexOf(short))), y, button: 'left', in: 'paragraph-0' })
+    // A press acts as the button comes up, so a drag that starts on a phrase selects instead of opening.
+    const x = widthOf(row.slice(0, row.indexOf(short)))
+    await ui.pointer({ type: 'down', x, y, button: 'left', in: 'paragraph-0' })
+    await ui.pointer({ type: 'up', x, y, button: 'left', in: 'paragraph-0' })
     presses.push(Date.now() - t1)
     for (let f = 0; f < 5; f++) {
       const t2 = Date.now()

@@ -5,7 +5,7 @@ Portable [Claude Code](https://claude.com/claude-code) setup. Each tool has its 
 | Tool | What it is | Install |
 |---|---|---|
 | [statusline](statusline/) | Quota-aware status line: context / 5h / weekly meters with pace ticks, per-window burn history, and a bar attributing what is filling the context | `curl -fsSL https://raw.githubusercontent.com/iamJeb/claude/main/statusline/install.sh \| bash` |
-| [stretch](plugins/stretch/) | Plugin: replies short by default, click a phrase to open it in place, open or close them all at once; finished tool groups fold to one line | `/plugin install stretch --marketplace iamJeb/claude` |
+| [stretch](plugins/stretch/) | Plugin: replies short by default, click a phrase or type its letter to open it in place, open or close them all at once, select and copy inside them, restyle them; finished tool groups fold to one line | `/plugin install stretch --marketplace iamJeb/claude` |
 
 ## stretch
 

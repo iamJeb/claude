@@ -22,8 +22,10 @@ const BEFORE_NOTE = '  '
 
 // The props each instance last drew, so a press reads the labels on screen now.
 const shown = new WeakMap<object, LinksProps>()
-// The address under the left button's last down, so a press lands only where the button comes up on the same label.
-const downOn = new WeakMap<object, string>()
+// The address and cell under the left button's last down, so a press lands only where the button
+// comes up on the same label and the same cell: a release that moved from its press, inside the
+// label or off it, was a drag and acts on nothing.
+const downOn = new WeakMap<object, { href: string; x: number; y: number }>()
 
 const Links: ClientModule<LinksProps, true> = (props, surface) => {
   const { Box, Text } = surface.elements
@@ -35,11 +37,12 @@ const Links: ClientModule<LinksProps, true> = (props, surface) => {
       if (event.type === 'down') {
         const href = hrefAt(surface, event.x, event.y)
         if (href === undefined) downOn.delete(surface)
-        else downOn.set(surface, href)
+        else downOn.set(surface, { href, x: event.x, y: event.y })
       } else if (event.type === 'up') {
-        const href = downOn.get(surface)
+        const down = downOn.get(surface)
         downOn.delete(surface)
-        if (href !== undefined && hrefAt(surface, event.x, event.y) === href) surface.post({ href } satisfies LinksPost)
+        if (down === undefined || down.x !== event.x || down.y !== event.y) return
+        if (hrefAt(surface, event.x, event.y) === down.href) surface.post({ href: down.href } satisfies LinksPost)
       }
     })
   }

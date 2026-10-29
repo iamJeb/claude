@@ -1,13 +1,14 @@
-// Adapted from cc-stretch (https://github.com/pro-vi/cc-stretch), MIT License, Copyright (c) 2026 pro-vi.
-// See ../LICENSE-cc-stretch.
-
+import { breakables } from './layout'
 import type { Segment, Stretch } from './parse'
 
-// A long form grows around its short form. The short form's words, found in
-// the long form in order, are anchors and never move; the words between them
-// arrive from the anchors outward, so the sentence widens at every seam at
-// once, to the left of an anchor as much as to its right. Words arrive whole:
-// a terminal has no room to fade one in, and half a word reads as a typo.
+// A long form grows around its short form. A word here is a piece a row may
+// break between (breakables in layout.ts), so Chinese and Japanese grow a
+// character at a time, with the punctuation that sticks to it, and Thai a word
+// at a time. The short form's words, found in the long form in order, are
+// anchors and never move; the words between them arrive from the anchors
+// outward, so the sentence widens at every seam at once, to the left of an
+// anchor as much as to its right. Words arrive whole: a terminal has no room
+// to fade one in, and half a word reads as a typo.
 
 type Token = { kind: 'word' | 'space'; text: string } | { kind: 'nested'; stretch: Stretch }
 
@@ -76,10 +77,12 @@ function reveal(run: Atom[], side: Side, progress: number): Atom[] {
   const left = run.slice(0, Math.ceil(count / 2))
   const right = run.slice(run.length - Math.floor(count / 2))
   if (left.length + right.length === run.length) return [...left, ...right]
-  // The two halves meet where words are still missing: exactly one space between them.
-  const isSpaceAtom = (atom: Atom | undefined) => typeof atom === 'string' && /^\s+$/.test(atom)
-  if (isSpaceAtom(left.at(-1)) && isSpaceAtom(right[0])) return [...left, ...right.slice(1)]
-  if (!isSpaceAtom(left.at(-1)) && !isSpaceAtom(right[0]) && left.length > 0 && right.length > 0) return [...left, ' ', ...right]
+  // The two halves meet where words are still missing: exactly one space between them. The space
+  // is added only where the long form has one beside the gap; a gap between Chinese characters
+  // joins without one, as the finished text reads.
+  const isGapSpaced = isSpace(run[left.length]) || isSpace(run[run.length - right.length - 1])
+  if (isSpace(left.at(-1)) && isSpace(right[0])) return [...left, ...right.slice(1)]
+  if (!isSpace(left.at(-1)) && !isSpace(right[0]) && left.length > 0 && right.length > 0 && isGapSpaced) return [...left, ' ', ...right]
 
   return [...left, ...right]
 }
@@ -90,7 +93,7 @@ function tokenize(long: Segment[]): Token[] {
       ? part
           .split(/(\s+)/)
           .filter(text => text !== '')
-          .map(text => ({ kind: /^\s+$/.test(text) ? 'space' : 'word', text }))
+          .flatMap((text): Token[] => (/^\s+$/.test(text) ? [{ kind: 'space', text }] : breakables(text).map(word => ({ kind: 'word', text: word }))))
       : [{ kind: 'nested', stretch: part }],
   )
 }
@@ -101,29 +104,44 @@ function tokenize(long: Segment[]): Token[] {
  * count where it stands.
  */
 function anchorsOf(short: string, tokens: Token[]): Set<number> {
-  const want = short.split(/\s+/).map(bare).filter(word => word !== '')
+  const wordsIn = (text: string) => text.split(/\s+/).flatMap(breakables)
+  const want = wordsIn(short).map(bare).filter(word => word !== '')
   const have: { token: number; word: string }[] = []
   tokens.forEach((token, i) => {
-    const words = token.kind === 'word' ? [token.text] : token.kind === 'nested' ? token.stretch.short.split(/\s+/) : []
+    const words = token.kind === 'word' ? [token.text] : token.kind === 'nested' ? wordsIn(token.stretch.short) : []
     for (const word of words.map(bare).filter(w => w !== '')) have.push({ token: i, word })
   })
 
-  // lengths[i][j]: the longest common run of want[i..] and have[j..].
-  const lengths = Array.from({ length: want.length + 1 }, () => new Array<number>(have.length + 1).fill(0))
-  for (let i = want.length - 1; i >= 0; i--) {
-    for (let j = have.length - 1; j >= 0; j--) {
-      const row = lengths[i] ?? [], below = lengths[i + 1] ?? []
-      row[j] = want[i] === have[j]?.word ? (below[j + 1] ?? 0) + 1 : Math.max(below[j] ?? 0, row[j + 1] ?? 0)
-    }
-  }
+  // The guide asks the long form to keep every word of the short form, in order. When it does, the
+  // earliest match of each word is already the longest common subsequence, so the table below, one
+  // cell per pair of words, is skipped: a Chinese long form has a word per character. When it does
+  // not, the table finds the most words that can be kept.
   const anchors = new Set<number>()
-  for (let i = 0, j = 0; i < want.length && j < have.length; ) {
-    if (want[i] === have[j]?.word) {
-      anchors.add(have[j]?.token ?? -1)
-      i++
-      j++
-    } else if ((lengths[i + 1]?.[j] ?? 0) >= (lengths[i]?.[j + 1] ?? 0)) i++
-    else j++
+  let matched = 0
+  for (const { token, word } of have) {
+    if (matched === want.length) break
+    if (word !== want[matched]) continue
+    anchors.add(token)
+    matched++
+  }
+  if (matched < want.length) {
+    anchors.clear()
+    // lengths[i][j]: the longest common run of want[i..] and have[j..].
+    const lengths = Array.from({ length: want.length + 1 }, () => new Array<number>(have.length + 1).fill(0))
+    for (let i = want.length - 1; i >= 0; i--) {
+      for (let j = have.length - 1; j >= 0; j--) {
+        const row = lengths[i] ?? [], below = lengths[i + 1] ?? []
+        row[j] = want[i] === have[j]?.word ? (below[j + 1] ?? 0) + 1 : Math.max(below[j] ?? 0, row[j + 1] ?? 0)
+      }
+    }
+    for (let i = 0, j = 0; i < want.length && j < have.length; ) {
+      if (want[i] === have[j]?.word) {
+        anchors.add(have[j]?.token ?? -1)
+        i++
+        j++
+      } else if ((lengths[i + 1]?.[j] ?? 0) >= (lengths[i]?.[j + 1] ?? 0)) i++
+      else j++
+    }
   }
   // Punctuation standing on its own right after an anchor (`{{...}}.`) belongs to that anchor.
   let last = -1

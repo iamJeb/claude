@@ -1,11 +1,9 @@
-// Adapted from cc-stretch (https://github.com/pro-vi/cc-stretch), MIT License, Copyright (c) 2026 pro-vi.
-// See ../LICENSE-cc-stretch.
-
 // Lays out a paragraph that holds stretches, for a Client to draw: its markdown as rows of styled
 // runs, wrapped to the region's width, so a press can be matched to the phrase under it. Claude
 // Code draws every paragraph without a stretch with its own markdown.
 
-import { isRule } from './parse'
+import { closesFence, isLinkable, isRule, openingFence } from './parse'
+import type { Segment, Stretch } from './parse'
 
 /** What a press on a pressable phrase does to its stretch. */
 export type Action = 'open' | 'close'
@@ -20,9 +18,22 @@ export type Run = {
   /** The colour of the words a stretch added. */
   tint?: string
   link?: { action: Action; key: string }
+  /** Where a markdown link or a bare URL goes, drawn as a hyperlink. */
+  href?: string
 }
 
 export type Row = Run[]
+
+/** How a row a line wrapped onto joins the row before it: what the break took out, and the lead's cells. */
+export type Continuation = { join: string; lead: number }
+
+// The rows a line wrapped onto, so a copy of several rows gives back the line as written.
+const continuations = new WeakMap<Row, Continuation>()
+
+/** How `row` continues the row before it, if a line wrapped onto it. */
+export function continuationOf(row: Row): Continuation | undefined {
+  return continuations.get(row)
+}
 
 // Unicode noncharacters frame a pressable phrase or a tinted word in composed text. Private-use
 // characters are not used, because Nerd Font icons live there and a reply can hold them. A reply's
@@ -65,7 +76,7 @@ export function dim(word: string): string {
 
 /** Whether a word is markdown syntax rather than text: a bullet, a list number, a rule, a fence, a pipe, a heading mark. */
 export function isMarkup(word: string): boolean {
-  return !/[\p{L}\p{N}]/u.test(word) || /^\d+[.)]$/.test(word) || /^(`{3,}|~{3,})/.test(word)
+  return !/[\p{L}\p{N}]/u.test(word) || /^\d+[.)]$/.test(word) || openingFence(word) !== undefined
 }
 
 /** A pressable phrase for composed text: drawn as `label`, a press does `action` to stretch `key`. */
@@ -79,12 +90,15 @@ export function layout(text: string, columns: number): Row[] {
   const rows: Row[] = []
   let fence: string | undefined
   for (const marked of text.split('\n')) {
-    const marker = /^[ \t]*(`{3,}|~{3,})/.exec(marked)?.[1]
-    if (fence !== undefined && marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length) {
+    // A fence is read from the line's text alone, as the parser reads it: a line such as ```python
+    // inside a block starts with the marker but does not close the block.
+    const bare = stripMarkers(marked)
+    if (fence !== undefined && closesFence(bare, fence)) {
       fence = undefined
       continue
     }
-    if (fence === undefined && marker !== undefined) {
+    const marker = fence === undefined ? openingFence(bare) : undefined
+    if (marker !== undefined) {
       fence = marker
       continue
     }
@@ -106,7 +120,13 @@ function lineRows(marked: string, width: number, isInFence: boolean): Row[] {
   if (cached !== undefined) return cached
   const line = untint(marked)
   const rows = isInFence ? cutRows([{ text: `  ${line.text}`, code: true }], width) : rowsOf(line, width)
-  const clean = rows.map(row => row.map(run => ({ ...run, text: stripMarkers(run.text) })).filter(run => run.text !== ''))
+  const clean = rows.map(row => {
+    const stripped = row.map(run => ({ ...run, text: stripMarkers(run.text) })).filter(run => run.text !== '')
+    // The rows a line wrapped onto keep how they join, which a copy across them reads.
+    const continuation = continuations.get(row)
+    if (continuation !== undefined) continuations.set(stripped, continuation)
+    return stripped
+  })
   if (lineCacheChars + key.length > LINE_CACHE_MAX_CHARS) {
     lineCache.clear()
     lineCacheChars = 0
@@ -133,6 +153,40 @@ export function linkAt(rows: Row[], x: number, y: number): Run['link'] {
   if (exact !== undefined) return exact
 
   return spans.find(span => span.link?.action === 'close' && x >= span.from - 1 && x < span.to + 1)?.link
+}
+
+/**
+ * Whether a ctrl- or alt-click opens a hyperlink to `href`: a web page does, and a `file:` link,
+ * which could name a program behind its words, is left to the terminal's own click.
+ */
+export function isWebLink(href: string): boolean {
+  return /^https?:/.test(href)
+}
+
+/** Where the hyperlink drawn at cell `x` of row `y` goes, if one is drawn there. */
+export function hrefAt(rows: Row[], x: number, y: number): string | undefined {
+  let at = 0
+  for (const run of rows[y] ?? []) {
+    const w = widthOf(run.text)
+    if (x >= at && x < at + w) return run.href
+    at += w
+  }
+
+  return undefined
+}
+
+/**
+ * The stretches `action` acts on among those drawn, with the stretches in `open` open: to open, those
+ * drawn as links with every stretch around them open; to close, those open, whose « is drawn. A short
+ * form over several lines is drawn open with no «, so the stretches inside it are drawn.
+ */
+export function targetsIn(parts: Segment[], open: readonly string[], action: Action): Stretch[] {
+  return parts.flatMap(part => {
+    if (typeof part === 'string' || part.long === undefined || !part.isClosed) return []
+    if (!isLinkable(part)) return targetsIn(part.long, open, action)
+    if (!open.includes(part.key)) return action === 'open' ? [part] : []
+    return [...(action === 'close' ? [part] : []), ...targetsIn(part.long, open, action)]
+  })
 }
 
 // Terminal cell widths, measured per grapheme cluster, which is what the reader sees as one character.
@@ -198,6 +252,58 @@ export function widthOf(text: string): number {
   for (const cluster of graphemes(text)) cells += clusterWidth(cluster)
 
   return cells
+}
+
+// Where a row may break in text without spaces. Chinese and Japanese break between any two
+// characters. Korean spaces its words, so it breaks at spaces as Latin text does. Thai, Lao, Khmer
+// and Burmese write words without spaces, and a row breaks between words where Intl.Segmenter
+// finds them. Closing punctuation, a Japanese small kana, the long-vowel mark and a mark drawn on
+// the letter before it never start a row; opening punctuation never ends one.
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Bopomofo}　-〿＀-￯]/u
+const SEGMENTED = /[\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u
+const NO_START = /[\p{Pe}\p{Pf},.:;!?，。、；：？！…·ぁぃぅぇぉっゃゅょゎゕゖァィゥェォッャュョヮヵヶーゝゞヽヾ々]/u
+const NO_END = /[\p{Ps}\p{Pi}]/u
+type WordSegmenter = { segment(text: string): Iterable<{ segment: string; index: number }> }
+type WordSegmenterClass = new (locale?: string, options?: { granularity: 'word' }) => WordSegmenter
+const wordSegmenter: WordSegmenter | undefined = (() => {
+  try {
+    const Segmenter = (Intl as unknown as { Segmenter?: WordSegmenterClass }).Segmenter
+    return Segmenter === undefined ? undefined : new Segmenter(undefined, { granularity: 'word' })
+  } catch {
+    return undefined
+  }
+})()
+
+/**
+ * One part of a line split at spaces, cut into the pieces a row may break between and growth adds
+ * one at a time; a run of spaces stays whole.
+ */
+export function breakables(text: string): string[] {
+  // Nothing below Thai breaks, so a Latin word or a run of spaces comes back whole without a look at
+  // each character.
+  if (!/[^\0-෿]/.test(text)) return [text]
+  const wordStarts = new Set<number>()
+  if (wordSegmenter !== undefined && SEGMENTED.test(text)) for (const word of wordSegmenter.segment(text)) wordStarts.add(word.index)
+  const pieces: string[] = []
+  let piece = ''
+  let last = ''
+  let isAfterUnspaced = false
+  let at = 0
+  for (const ch of text) {
+    const isUnspaced = UNSPACED.test(ch)
+    const isWordStart = wordStarts.has(at) && SEGMENTED.test(last + ch)
+    if (piece !== '' && (isUnspaced || isAfterUnspaced || isWordStart) && !NO_START.test(ch) && !NO_END.test(last) && !ZERO_WIDTH.test(ch)) {
+      pieces.push(piece)
+      piece = ''
+    }
+    piece += ch
+    last = ch
+    isAfterUnspaced = isUnspaced || (isAfterUnspaced && NO_START.test(ch))
+    at += ch.length
+  }
+  if (piece !== '') pieces.push(piece)
+
+  return pieces
 }
 
 /**
@@ -341,9 +447,13 @@ function inline(text: string, marks: Marks, isBold = false, outer: Run['link'] =
     const markdownLink = ch === '[' ? MARKDOWN_LINK.exec(text) : null
     if (markdownLink) {
       const label = markdownLink[1] ?? ''
-      const labelRuns = inline(label, marksFrom(marks, i + 1), bold, pressable, { ...extraAll, underline: true, ...(italic && { italic: true }) })
+      const href = stripMarkers(markdownLink[2] ?? '')
+      // A target that opens the same from any folder is drawn as a hyperlink; any other keeps its
+      // target beside its label. Claude Code 2.1.302's own markdown links a relative path too.
+      const isFollowed = /^(https?|file):/.test(href)
+      const labelRuns = inline(label, marksFrom(marks, i + 1), bold, pressable, { ...extraAll, ...(isFollowed ? { href } : { underline: true }), ...(italic && { italic: true }) })
       labelRuns.forEach(push)
-      emit(` (${stripMarkers(markdownLink[2] ?? '')})`, i + markdownLink[0].length - 1, { dim: true })
+      if (!isFollowed) emit(` (${href})`, i + markdownLink[0].length - 1, { dim: true })
       i += markdownLink[0].length
       continue
     }
@@ -352,6 +462,16 @@ function inline(text: string, marks: Marks, isBold = false, outer: Run['link'] =
     // between runs.
     let stop = i + 1
     while (stop < text.length && !INLINE_SPECIAL.test(text[stop] ?? '') && tints[stop] === tints[i] && dims[stop] === dims[i]) stop += 1
+    // A bare URL inside the piece is drawn as a hyperlink, the text before it as it is.
+    const scheme = URL_SCHEME.exec(text.slice(i, stop))
+    const urlAt = scheme === null || (scheme.index === 0 && /\w/.test(text[i - 1] ?? ' ')) ? -1 : i + scheme.index
+    const url = urlAt === -1 ? undefined : bareUrlAt(text, urlAt)
+    if (url !== undefined) {
+      emit(text.slice(i, urlAt), i)
+      emit(url, urlAt, { href: url })
+      i = urlAt + url.length
+      continue
+    }
     emit(text.slice(i, stop), i)
     i = stop
   }
@@ -359,7 +479,30 @@ function inline(text: string, marks: Marks, isBold = false, outer: Run['link'] =
   return runs
 }
 
-/** Word-wraps runs into rows of `width` cells; the first row starts with `first`, later rows with `rest`. */
+// Where an `http:` or `https:` URL may start inside a piece of plain text: not inside a word.
+const URL_SCHEME = /(?<!\w)https?:\/\//
+
+/**
+ * The `http:` or `https:` URL written at `at`, without punctuation that ends the sentence after it
+ * or a closing bracket it did not open.
+ */
+function bareUrlAt(text: string, at: number): string | undefined {
+  let url = /^https?:\/\/[^\s<>`﷐-﷯]+/.exec(text.slice(at))?.[0]
+  if (url === undefined) return undefined
+  for (;;) {
+    const opened = url.split('(').length - 1
+    const closed = url.split(')').length - 1
+    if (/[.,;:!?'"*_]$/.test(url) || (url.endsWith(')') && closed > opened)) url = url.slice(0, -1)
+    else break
+  }
+
+  return /^https?:\/\/[^/]/.test(url) ? url : undefined
+}
+
+/**
+ * Wraps runs into rows of `width` cells, breaking at spaces and, in text without them, where
+ * `breakables` allows; the first row starts with `first`, later rows with `rest`.
+ */
 function wrap(runs: Run[], width: number, first: string, rest: string, isDimLead = false): Row[] {
   const rows: Row[] = []
   let row: Row = []
@@ -377,31 +520,45 @@ function wrap(runs: Run[], width: number, first: string, rest: string, isDimLead
     used += widthOf(piece.text)
     isBare = false
   }
-  const breakRow = () => {
+  // The row ends here and the next begins; `isAtSpace` when the break stands for a space the line
+  // wrote, which a copy across the two rows puts back.
+  const breakRow = (isAtSpace = false) => {
     const last = row.at(-1)
+    let join = isAtSpace ? ' ' : ''
     if (last !== undefined && !isBare) {
-      last.text = last.text.trimEnd()
+      const trimmed = last.text.trimEnd()
+      if (trimmed !== last.text) join = ' '
+      last.text = trimmed
       if (last.text === '') row.pop()
     }
     rows.push(row)
     begin(rest)
+    continuations.set(row, { join, lead: used })
   }
 
   begin(first)
-  const parts = runs.flatMap(run => run.text.split(/( +)/).filter(text => text !== '').map(text => ({ run, text })))
+  // Each part is a run of spaces or a piece of a word: a word in text without spaces is cut where
+  // `breakables` lets a row break, and every piece after the first `isBreakable` from the one before.
+  const parts = runs.flatMap(run =>
+    run.text
+      .split(/( +)/)
+      .filter(text => text !== '')
+      .flatMap(text => (text.trim() === '' ? [{ run, text, isBreakable: false }] : breakables(text).map((piece, i) => ({ run, text: piece, isBreakable: i > 0 })))),
+  )
   const isWord = (at: number) => (parts[at]?.text.trim() ?? '') !== ''
-  parts.forEach(({ run, text }, at) => {
+  parts.forEach(({ run, text, isBreakable }, at) => {
     if (!isWord(at)) {
       if (isBare) return
       if (used + widthOf(text) <= width) put({ ...run, text })
-      else breakRow()
+      else breakRow(true)
       return
     }
-    // Pieces that touch with no space between, such as a link and the » or full stop after it,
-    // read as one word, so a row that cannot take them all breaks before the first.
-    if (!isBare && !isWord(at - 1)) {
+    // Pieces that touch with no space between and no break allowed between them, such as a link
+    // and the » or full stop after it, read as one word, so a row that cannot take them all breaks
+    // before the first.
+    if (!isBare && (!isWord(at - 1) || isBreakable)) {
       let whole = 0
-      for (let k = at; isWord(k); k++) whole += widthOf(parts[k]?.text ?? '')
+      for (let k = at; isWord(k) && (k === at || parts[k]?.isBreakable !== true); k++) whole += widthOf(parts[k]?.text ?? '')
       if (used + whole > width && whole <= width - widthOf(rest)) breakRow()
     }
     let word = text
@@ -439,6 +596,7 @@ function cutRows(runs: Run[], width: number): Row[] {
         rows.push(row)
         row = []
         used = 0
+        continuations.set(row, { join: '', lead: 0 })
         continue
       }
       row.push({ ...run, text: head })
@@ -472,6 +630,6 @@ function cut(text: string, room: number, force: boolean): [string, string] {
 function isSameStyle(a: Run, b: Run): boolean {
   return (
     a.bold === b.bold && a.italic === b.italic && a.code === b.code && a.underline === b.underline && a.dim === b.dim && a.tint === b.tint &&
-    a.link?.action === b.link?.action && a.link?.key === b.link?.key
+    a.link?.action === b.link?.action && a.link?.key === b.link?.key && a.href === b.href
   )
 }

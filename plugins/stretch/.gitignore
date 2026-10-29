@@ -1,0 +1,6 @@
+# Written by Claude Code each time it loads the plugin from this folder
+.claude-plugin/types/
+/tsconfig.json
+# Bench measurements, run folders and the results they produce
+bench/out/
+node_modules/

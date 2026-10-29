@@ -293,7 +293,7 @@ describe('/stretch words', () => {
   })
 
   test('the usage names the new word', () => {
-    expect(USAGE).toContain('Usage: /stretch on | off | open-all | close-all | words N.')
+    expect(USAGE).toContain('Usage: /stretch on | off | open-all | close-all | words N | style.')
     expect(USAGE).toContain('10 to 2000')
   })
 })

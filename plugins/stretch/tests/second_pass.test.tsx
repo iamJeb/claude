@@ -57,7 +57,9 @@ describe('markup inside markdown', () => {
     const ui = await mount($, FS(100), 'See [{{the docs|the vendor docs page}}](https://x.io/a) now.')
     const rows = (await rowsOf(ui)).join('\n')
     expect(MARKS.test(rows)).toBe(false)
-    expect(rows).toBe('See the docs (https://x.io/a) now.')
+    // The label is drawn as a hyperlink, its target behind it rather than beside it.
+    expect(rows).toBe('See the docs now.')
+    expect((await ui.find({ type: 'Link', in: 'paragraph-0' }))?.props).toMatchObject({ href: 'https://x.io/a' })
     await clickOn(ui, 'the docs')
     const opened = (await rowsOf(ui)).join('\n')
     expect(opened).toContain('the vendor docs page «')
