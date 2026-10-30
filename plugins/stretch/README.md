@@ -11,7 +11,7 @@ A Claude Code plugin. Replies come back short, and the detail is one click away.
 /tui fullscreen
 ```
 
-Needs Claude Code 2.1.275 or later and a fullscreen terminal or the desktop app. Details under [Install](#install).
+Needs Claude Code 2.1.300 or later and a fullscreen terminal or the desktop app. Details under [Install](#install).
 
 ## What you get
 
@@ -85,7 +85,7 @@ Four settings show up in `/config`. Short reply length (`shortWords`, 150 by def
 
 ## Install
 
-Needs Claude Code 2.1.275 or later. In a session:
+Needs Claude Code 2.1.300 or later, since the keyboard letters listen to prompt events older versions lack and a version without them refuses the whole plugin. In a session:
 
 ```
 /plugin install stretch --marketplace iamJeb/claude
